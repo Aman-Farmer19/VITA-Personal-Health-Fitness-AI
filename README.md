@@ -3,6 +3,10 @@
 > A real-time AI health and fitness companion with voice interaction, activity tracking, facial-expression awareness, and a reactive 3D holographic interface.
 
 VITA is designed as a futuristic personal AI companion: speak naturally, receive an AI response, track activity from a connected phone, and watch the orb react to voice, movement, and mood.
+<p align="center">
+  <img src="screenshots/vita-dashboard.png" alt="VITA Personal Health & Fitness AI" width="100%">
+</p>
+
 
 ## ✨ What VITA Does
 
@@ -104,6 +108,11 @@ Both devices should be connected to the same local network.
 ### 🎙️ Voice
 
 Click **VOICE**, speak naturally, and stop speaking. VITA detects the end of the utterance, sends the recording for transcription, passes the resulting text to the AI agent, and speaks the response back.
+## 🎙️ Voice Interaction
+
+<p align="center">
+  <img src="screenshots/vita-voice.png" alt="VITA voice interaction" width="100%">
+</p>
 
 The voice pipeline is:
 
@@ -122,7 +131,11 @@ You can track activity locally or use the phone companion:
 ```text
 Phone sensors → WebSocket → Laptop → VITA HUD
 ```
+## 👟 Real-Time Activity Tracking
 
+<p align="center">
+  <img src="screenshots/vita-steps.png" alt="VITA activity tracking" width="100%">
+</p>
 VITA tracks:
 
 - Steps
