@@ -7,8 +7,8 @@ VITA is designed as a futuristic personal AI companion: speak naturally, receive
 ## ✨ What VITA Does
 
 - 🎙️ **Voice interaction** — record speech directly from the browser and send it through the VITA voice pipeline.
-- 📝 **Whisper transcription** — Groq Whisper converts recorded speech into text before the AI agent processes it. `whisper-large-v3-turbo` is optimized for fast speech-to-text and supports WEBM audio. citeturn762906search1turn762906search2
-- 🧠 **AI agent** — Groq-powered VITA responses using `qwen/qwen3.6-27b`, with non-thinking mode used for fast conversational responses. The model supports tool use, reasoning, JSON mode, and vision for future agent capabilities. citeturn762906search0turn762906search5
+- 📝 **Whisper transcription** — Groq Whisper converts recorded speech into text before the AI agent processes it.
+- 🧠 **AI agent** — Groq-powered VITA responses using `qwen/qwen3.6-27b` with a fast conversational configuration.
 - 🔊 **Voice responses** — VITA speaks back through the browser's Speech Synthesis API with a preferred female English voice when available.
 - 🌀 **Reactive 3D orb** — Three.js visualization with bloom, orbital elements, activity-aware motion, and voice-reactive animation.
 - 📱 **Phone activity tracking** — a companion `/phone` page reads device motion data and streams activity to the laptop over WebSockets.
@@ -50,8 +50,6 @@ VITA is designed as a futuristic personal AI companion: speak naturally, receive
                   ▼
              🔊 VITA SPEAKS
 ```
-
-Groq provides the speech-to-text endpoint used by VITA and supports `whisper-large-v3-turbo` for fast multilingual transcription. citeturn762906search1turn762906search2
 
 ## 🚀 Quick Start
 
@@ -155,7 +153,7 @@ vita-app/
 │   │   │   └── page.tsx           # Phone sensor companion
 │   │   ├── globals.css             # HUD styling
 │   │   ├── layout.tsx
-│   │   └── page.tsx                # Main VITA page
+│   │   └── page.tsx               # Main VITA page
 │   │
 │   ├── components/
 │   │   └── VitaOrb.tsx             # Main VITA UI + Three.js experience
@@ -187,8 +185,6 @@ vita-app/
 | Computer vision | face-api.js |
 | Realtime transport | WebSocket |
 | Styling | Tailwind CSS + custom HUD CSS |
-
-Groq currently documents `qwen/qwen3.6-27b` as supporting tool use, reasoning, JSON mode, and vision, making it a useful foundation for future VITA agent actions. citeturn762906search0turn762906search6
 
 ## 🔐 Privacy & Secrets
 
