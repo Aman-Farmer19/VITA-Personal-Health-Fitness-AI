@@ -1,0 +1,177 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-space-mono: "SFMono-Regular", "Consolas", "Liberation Mono", "Menlo", monospace;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  background: #050510;
+  color: #00E5FF;
+  font-family: var(--font-space-mono);
+  overflow: hidden;
+  width: 100%;
+  height: 100%;
+}
+
+/* ── HUD corner brackets ── */
+.hud-corner {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+}
+
+.hud-corner.tl {
+  top: 16px;
+  left: 16px;
+  border-top: 2px solid #00E5FF;
+  border-left: 2px solid #00E5FF;
+}
+
+.hud-corner.tr {
+  top: 16px;
+  right: 16px;
+  border-top: 2px solid #00E5FF;
+  border-right: 2px solid #00E5FF;
+}
+
+.hud-corner.bl {
+  bottom: 16px;
+  left: 16px;
+  border-bottom: 2px solid #00E5FF;
+  border-left: 2px solid #00E5FF;
+}
+
+.hud-corner.br {
+  bottom: 16px;
+  right: 16px;
+  border-bottom: 2px solid #00E5FF;
+  border-right: 2px solid #00E5FF;
+}
+
+/* ── Scan line ── */
+.scan-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, #00E5FF44, #00E5FF, #00E5FF44, transparent);
+  animation: scan 4s linear infinite;
+  opacity: 0.4;
+}
+
+@keyframes scan {
+  0% {
+    top: -2px;
+    opacity: 0;
+  }
+
+  10% {
+    opacity: 0.5;
+  }
+
+  90% {
+    opacity: 0.5;
+  }
+
+  100% {
+    top: 100%;
+    opacity: 0;
+  }
+}
+
+/* ── Status dot ── */
+.status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #00FF88;
+  margin-right: 6px;
+  animation: blink 1.5s infinite;
+}
+
+@keyframes blink {
+
+  0%,
+  100% {
+    opacity: 1
+  }
+
+  50% {
+    opacity: 0.3
+  }
+}
+
+/* ── Stat bar ── */
+.stat-bar {
+  height: 2px;
+  background: #1a0a2e;
+  border-radius: 1px;
+  overflow: hidden;
+  width: 80px;
+}
+
+.stat-bar-fill {
+  height: 100%;
+  border-radius: 1px;
+  transition: width 0.8s ease, background 0.5s ease;
+}
+
+/* ── HUD Button ── */
+.hud-btn {
+  cursor: pointer;
+  background: transparent;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  padding: 8px 14px;
+  border-radius: 2px;
+  transition: all 0.3s;
+  white-space: nowrap;
+}
+
+.hud-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Step ring ── */
+.step-ring-arc {
+  transition: stroke-dashoffset 0.8s ease, stroke 0.5s ease;
+}
+
+/* ── Voice bar ── */
+.voice-bar {
+  width: 3px;
+  background: #FF2D9A;
+  border-radius: 2px;
+  height: 3px;
+  opacity: 0;
+  transition: height 0.07s ease;
+}
+
+.voice-bar.active {
+  opacity: 1;
+}
+
+/* ── Phone page button ── */
+.phone-btn {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  padding: 14px 28px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.3s;
+  border: 1.5px solid;
+  background: transparent;
+}

@@ -1,0 +1,17 @@
+{
+  "name": "VITA — Health & Fitness AI",
+  "short_name": "VITA",
+  "description": "Your personal health and fitness AI assistant",
+  "start_url": "/phone",
+  "display": "standalone",
+  "background_color": "#050510",
+  "theme_color": "#050510",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    }
+  ]
+}
