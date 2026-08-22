@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const GROQ_TTS_URL =
-  "https://api.groq.com/openai/v1/audio/speech";
+const GROQ_TTS_URL = "https://api.groq.com/openai/v1/audio/speech";
+
+export async function GET() {
+  return NextResponse.json({ ok: true, service: "speak" });
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -24,8 +27,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const text = input.slice(0, 200);
-
     const response = await fetch(GROQ_TTS_URL, {
       method: "POST",
       headers: {
@@ -35,7 +36,7 @@ export async function POST(req: NextRequest) {
       body: JSON.stringify({
         model: "canopylabs/orpheus-v1-english",
         voice: "hannah",
-        input: text,
+        input: input.slice(0, 200),
         response_format: "wav",
       }),
       cache: "no-store",
@@ -43,11 +44,14 @@ export async function POST(req: NextRequest) {
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error("[VITA TTS ERROR]", errorText);
+      console.warn("[VITA TTS] Groq unavailable:", errorText);
 
       return NextResponse.json(
-        { error: errorText || "Groq TTS request failed." },
-        { status: response.status }
+        {
+          error: errorText || "Groq TTS unavailable.",
+          code: "tts_unavailable",
+        },
+        { status: 503 }
       );
     }
 
@@ -61,8 +65,6 @@ export async function POST(req: NextRequest) {
       },
     });
   } catch (error: any) {
-    console.error("[VITA SPEAK ERROR]", error);
-
     return NextResponse.json(
       {
         error:
