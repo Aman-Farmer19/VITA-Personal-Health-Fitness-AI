@@ -13,6 +13,7 @@ interface VitaSpeechRecognitionEvent extends Event {
     [index: number]: {
       readonly length: number;
       readonly 0: VitaSpeechRecognitionAlternative;
+      readonly isFinal?: boolean;
     };
   };
 }
@@ -44,8 +45,6 @@ type VitaWindow = Window & typeof globalThis & {
 
 const STOP_PHRASE = /\bvita\s+stop\s+now\b/i;
 
-// Browser Web Speech often hears "Vita" as "beta", "bita", "veta", etc.
-// Keep the wake word tolerant, but still require the two-word "hello <name>" shape.
 const WAKE_NAME_VARIANTS = new Set([
   'vita',
   'beta',
@@ -57,16 +56,23 @@ const WAKE_NAME_VARIANTS = new Set([
   'beeta',
 ]);
 
-function isWakePhrase(text: string) {
-  const words = text
+function normalizeSpeech(text: string) {
+  return text
     .toLowerCase()
     .replace(/[^a-z\s]/g, ' ')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
-  if (words.length < 2 || words[0] !== 'hello') return false;
-  return WAKE_NAME_VARIANTS.has(words[1]);
+function isWakePhrase(text: string) {
+  const words = normalizeSpeech(text).split(' ').filter(Boolean);
+  if (words.length < 2) return false;
+
+  for (let i = 0; i < words.length - 1; i += 1) {
+    if (words[i] === 'hello' && WAKE_NAME_VARIANTS.has(words[i + 1])) return true;
+  }
+
+  return false;
 }
 
 function getGreeting() {
@@ -155,6 +161,8 @@ export default function VitaSessionController() {
   const lastTranscriptRef = useRef('');
   const greetingRef = useRef(false);
   const ttsCooldownRef = useRef(false);
+  const wakeBackoffRef = useRef(500);
+  const destroyedRef = useRef(false);
 
   const speechBusy = useCallback(() => {
     if (!('speechSynthesis' in window)) return false;
@@ -189,31 +197,29 @@ export default function VitaSessionController() {
     const voice = await getFemaleVoice();
     const text = `${getGreeting()} What we are gonna do today, Boss?`;
     const utterance = new SpeechSynthesisUtterance(text);
+    const selectedVoice = voice ?? (await getFemaleVoice());
 
-    if (voice) {
-      utterance.voice = voice;
-      utterance.lang = voice.lang;
-    } else {
-      const retry = await getFemaleVoice();
-      if (!retry) {
-        console.warn('[VITA SESSION] No female English voice available; skipping greeting rather than using an arbitrary voice.');
-        return;
-      }
-      utterance.voice = retry;
-      utterance.lang = retry.lang;
+    if (!selectedVoice) {
+      console.warn('[VITA SESSION] No female English voice available; greeting skipped.');
+      return;
     }
 
+    utterance.voice = selectedVoice;
+    utterance.lang = selectedVoice.lang;
     utterance.rate = 0.98;
     utterance.pitch = 1.06;
     utterance.volume = 1;
 
-    console.log('[VITA SESSION] Greeting voice:', `${utterance.voice?.name ?? 'unknown'} (${utterance.voice?.lang ?? 'unknown'})`);
+    console.log('[VITA SESSION] Greeting voice:', `${selectedVoice.name} (${selectedVoice.lang})`);
 
     greetingRef.current = true;
     ttsCooldownRef.current = true;
 
     await new Promise<void>((resolve) => {
+      let settled = false;
       const clear = () => {
+        if (settled) return;
+        settled = true;
         greetingRef.current = false;
         window.setTimeout(() => {
           ttsCooldownRef.current = false;
@@ -230,6 +236,7 @@ export default function VitaSessionController() {
     if (activeRef.current || speechBusy()) return;
 
     activeRef.current = true;
+    wakeBackoffRef.current = 500;
     stopWakeRecognition();
     console.log('[VITA SESSION] ACTIVE');
 
@@ -243,6 +250,7 @@ export default function VitaSessionController() {
   }, [clickVoiceButton, speakGreeting, speechBusy, stopWakeRecognition]);
 
   const armWakeListener = useCallback(async () => {
+    if (destroyedRef.current) return;
     if (activeRef.current || recognitionRef.current || startingRef.current || speechBusy()) return;
 
     const w = window as VitaWindow;
@@ -267,27 +275,32 @@ export default function VitaSessionController() {
 
     startingRef.current = true;
     const recognition = new Recognition();
-    // Wake listening is a single short utterance. Continuous mode caused
-    // unnecessary no-speech restart churn in Chrome.
-    recognition.continuous = false;
-    recognition.interimResults = false;
+    recognition.continuous = true;
+    recognition.interimResults = true;
     recognition.lang = 'en-IN';
-    recognition.maxAlternatives = 1;
+    recognition.maxAlternatives = 3;
 
     recognition.onstart = () => {
       startingRef.current = false;
+      wakeBackoffRef.current = 500;
       console.log('[VITA WAKE] LISTENING — say "Hello Vita"');
     };
 
     recognition.onaudiostart = () => console.log('[VITA WAKE] microphone active');
 
     recognition.onresult = (event) => {
-      const result = event.results[event.results.length - 1];
-      const text = result?.[0]?.transcript?.trim() ?? '';
-      if (!text || activeRef.current || speechBusy()) return;
-      console.log('[VITA WAKE]', text);
-      if (isWakePhrase(text)) {
-        void activateSession();
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const text = result?.[0]?.transcript?.trim() ?? '';
+        if (!text || activeRef.current || speechBusy()) continue;
+
+        console.log('[VITA WAKE]', text, result?.isFinal ? '(final)' : '(interim)');
+
+        if (isWakePhrase(text)) {
+          stopWakeRecognition();
+          void activateSession();
+          return;
+        }
       }
     };
 
@@ -295,26 +308,31 @@ export default function VitaSessionController() {
       startingRef.current = false;
       recognitionRef.current = null;
 
-      if (event.error !== 'no-speech') {
+      if (event.error !== 'no-speech' && event.error !== 'aborted') {
         console.warn('[VITA WAKE ERROR]', event.error);
       }
 
       if (activeRef.current || event.error === 'not-allowed' || event.error === 'service-not-allowed') return;
 
       if (restartTimerRef.current) window.clearTimeout(restartTimerRef.current);
-      restartTimerRef.current = window.setTimeout(() => { void armWakeListener(); }, event.error === 'no-speech' ? 2500 : 1200);
+      const delay = Math.min(wakeBackoffRef.current, 5000);
+      wakeBackoffRef.current = Math.min(wakeBackoffRef.current * 2, 5000);
+      restartTimerRef.current = window.setTimeout(() => { void armWakeListener(); }, delay);
     };
 
     recognition.onend = () => {
       startingRef.current = false;
       recognitionRef.current = null;
-      if (!activeRef.current && !speechBusy()) {
+      if (!activeRef.current && !speechBusy() && !destroyedRef.current) {
         if (restartTimerRef.current) window.clearTimeout(restartTimerRef.current);
-        restartTimerRef.current = window.setTimeout(() => { void armWakeListener(); }, 500);
+        const delay = Math.min(wakeBackoffRef.current, 5000);
+        wakeBackoffRef.current = Math.min(wakeBackoffRef.current * 2, 5000);
+        restartTimerRef.current = window.setTimeout(() => { void armWakeListener(); }, delay);
       }
     };
 
     recognitionRef.current = recognition;
+
     try {
       recognition.start();
     } catch (error) {
@@ -322,12 +340,13 @@ export default function VitaSessionController() {
       recognitionRef.current = null;
       console.warn('[VITA WAKE] start() failed:', error);
     }
-  }, [activateSession, speechBusy]);
+  }, [activateSession, speechBusy, stopWakeRecognition]);
 
   const deactivateSession = useCallback(() => {
     activeRef.current = false;
     greetingRef.current = false;
     ttsCooldownRef.current = false;
+    wakeBackoffRef.current = 500;
     stopWakeRecognition();
 
     const button = getVoiceButton();
@@ -402,9 +421,11 @@ export default function VitaSessionController() {
   }, [clickVoiceButton, deactivateSession, speechBusy]);
 
   useEffect(() => {
+    destroyedRef.current = false;
     const kickoff = window.setTimeout(() => { void armWakeListener(); }, 900);
 
     return () => {
+      destroyedRef.current = true;
       window.clearTimeout(kickoff);
       if (restartTimerRef.current) window.clearTimeout(restartTimerRef.current);
       if (statusTimerRef.current) window.clearTimeout(statusTimerRef.current);
