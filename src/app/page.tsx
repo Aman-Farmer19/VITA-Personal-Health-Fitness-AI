@@ -1,5 +1,6 @@
 import dynamic from 'next/dynamic';
 import VitaSessionController from '@/components/VitaSessionController';
+import VitaTtsVoiceLock from '@/components/VitaTtsVoiceLock';
 
 // Dynamically import VitaOrb — disables SSR for Three.js
 const VitaOrb = dynamic(() => import('@/components/VitaOrb'), { ssr: false });
@@ -7,6 +8,7 @@ const VitaOrb = dynamic(() => import('@/components/VitaOrb'), { ssr: false });
 export default function Home() {
   return (
     <>
+      <VitaTtsVoiceLock />
       <VitaOrb />
       {/* Keep the wake/session controller in the initial client bundle so the
           passive "Hello Vita" listener starts as soon as the page mounts. */}
