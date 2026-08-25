@@ -9,8 +9,6 @@ type VitaWindow = Window & typeof globalThis & {
 };
 
 const STOP_PHRASE = /\bvita\s+stop\s+now\b/i;
-// Do not accept "hello beta/veeta" as a wake word. False activations are worse
-// than requiring one more clean pronunciation of "Hello Vita".
 const WAKE_PHRASE = /^hello\s+vita[.!?]?$/i;
 
 function getGreeting() {
@@ -37,15 +35,14 @@ async function getFemaleVoice(): Promise<SpeechSynthesisVoice | null> {
         resolve(speech.getVoices());
       };
       speech.addEventListener('voiceschanged', finish);
-      window.setTimeout(finish, 1200);
+      window.setTimeout(finish, 1500);
     });
   }
 
   const femalePatterns = [
-    /microsoft heera/i,
     /google uk english female/i,
-    /google us english/i,
     /microsoft zira/i,
+    /microsoft heera/i,
     /aria/i,
     /jenny/i,
     /samantha/i,
@@ -62,7 +59,9 @@ async function getFemaleVoice(): Promise<SpeechSynthesisVoice | null> {
     if (voice) return voice;
   }
 
-  return voices.find((candidate) => /^en(-|_)/i.test(candidate.lang)) ?? null;
+  // Do not silently switch to an arbitrary English voice during the greeting;
+  // the normal VITA TTS path already has its own deterministic female fallback.
+  return null;
 }
 
 function getVoiceButton() {
@@ -134,15 +133,21 @@ export default function VitaSessionController() {
     const text = `${getGreeting()} What we are gonna do today, Boss?`;
     const utterance = new SpeechSynthesisUtterance(text);
 
-    utterance.voice = voice;
-    utterance.lang = voice?.lang ?? 'en-IN';
+    if (voice) {
+      utterance.voice = voice;
+      utterance.lang = voice.lang;
+    } else {
+      utterance.lang = 'en-IN';
+      console.warn('[VITA SESSION] No female browser voice loaded yet; using en-IN fallback.');
+    }
+
     utterance.rate = 0.98;
     utterance.pitch = 1.06;
     utterance.volume = 1;
 
     console.log(
       '[VITA SESSION] Greeting voice:',
-      voice ? `${voice.name} (${voice.lang})` : 'browser default',
+      voice ? `${voice.name} (${voice.lang})` : 'en-IN fallback',
     );
 
     greetingRef.current = true;
@@ -154,7 +159,7 @@ export default function VitaSessionController() {
         window.setTimeout(() => {
           ttsCooldownRef.current = false;
           resolve();
-        }, 800);
+        }, 1200);
       };
       utterance.onerror = () => {
         greetingRef.current = false;
@@ -179,7 +184,7 @@ export default function VitaSessionController() {
         if (activeRef.current && !greetingRef.current && !ttsCooldownRef.current) {
           clickVoiceButton();
         }
-      }, 250);
+      }, 300);
     }
   }, [clickVoiceButton, speakGreeting, stopWakeRecognition]);
 
@@ -289,6 +294,8 @@ export default function VitaSessionController() {
     window.setTimeout(() => { void armWakeListener(); }, 600);
   }, [armWakeListener, clickVoiceButton, stopWakeRecognition]);
 
+  // Own the manual VOICE click. The old implementation let VitaOrb's click
+  // handler start recording immediately while the greeting was still speaking.
   useEffect(() => {
     const onDocumentClick = (event: MouseEvent) => {
       const target = event.target as HTMLElement | null;
@@ -298,9 +305,9 @@ export default function VitaSessionController() {
       const label = button.textContent?.trim() ?? '';
 
       if (!activeRef.current && label.includes('VOICE')) {
-        activeRef.current = true;
-        stopWakeRecognition();
-        void speakGreeting();
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        void activateSession();
         return;
       }
 
@@ -313,7 +320,7 @@ export default function VitaSessionController() {
 
     document.addEventListener('click', onDocumentClick, true);
     return () => document.removeEventListener('click', onDocumentClick, true);
-  }, [deactivateSession, speakGreeting, stopWakeRecognition]);
+  }, [activateSession, deactivateSession]);
 
   useEffect(() => {
     let lastStatus = '';
@@ -341,7 +348,7 @@ export default function VitaSessionController() {
             if (activeRef.current && !greetingRef.current && !ttsCooldownRef.current) {
               clickVoiceButton();
             }
-          }, 300);
+          }, 1200);
         }
 
         lastStatus = status;
