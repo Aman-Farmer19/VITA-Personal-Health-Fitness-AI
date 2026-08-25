@@ -55,17 +55,7 @@ export default function VitaOrb() {
     voiceAmp: number; stepBoost: number; moodColor: number; activityLevel: number;
     mx: number; my: number; tx: number; ty: number; t: number; animId: number;
   } | null>(null);
-
-  const audioRef = useRef<any>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const faceApiRef = useRef<any>(null);
-  const detectTimer = useRef<any>(null);
-  const simMoodTimer = useRef<any>(null);
-  const simEI = useRef(0);
-  const wsRef = useRef<WebSocket | null>(null);
-  const motionRef = useRef<any>(null);
-  const simStepTimer = useRef<any>(null);
-  const stepDetRef = useRef<any>(null);
+  const recordingStartedAtRef = useRef(0);
 
   useEffect(() => {
     if (!('speechSynthesis' in window)) return;
@@ -110,7 +100,7 @@ export default function VitaOrb() {
           }
           if (msg.type === 'phone_connected') setPhoneLinked(true);
           if (msg.type === 'phone_disconnected') setPhoneLinked(false);
-        } catch {}
+        } catch { }
       };
       ws.onclose = () => { if (!disposed) reconnect = setTimeout(connect, 3000); };
     };
@@ -418,7 +408,7 @@ export default function VitaOrb() {
       const data = new Uint8Array(analyser.fftSize);
       ctx.createMediaStreamSource(stream).connect(analyser);
       let rafId = 0;
-      const tick = () => { rafId = requestAnimationFrame(tick); analyser.getByteFrequencyData(data); if (threeRef.current) { let sum = 0; for (const v of data) sum += v; threeRef.current.voiceAmp = Math.min(sum / data.length / 128, 1); } };
+      const tick = () => { rafId = requestAnimationFrame(tick); analyser.getByteFrequencyData(data); if (threeRef.current) { let sum = 0; for (let i = 0; i < data.length; i++) sum += data[i]; threeRef.current.voiceAmp = Math.min(sum / data.length / 128, 1); } };
       tick();
       const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
       const recorder = mimeType ? new MediaRecorder(stream, { mimeType, audioBitsPerSecond: 64000 }) : new MediaRecorder(stream);
@@ -519,7 +509,7 @@ export default function VitaOrb() {
         }
 
         const recordingDuration =
-          now - recordingStartedAt;
+          now - recordingStartedAtRef.current;
 
         const silenceDuration =
           now - lastVoiceAt;
@@ -553,6 +543,11 @@ export default function VitaOrb() {
           requestAnimationFrame(detectSilence);
       };
       audioRef.current = { ctx, analyser, data, rafId, stream, recorder, chunks, silenceRaf: 0 };
+      recorder.onstart = () => {
+        recordingStartedAtRef.current = Date.now();
+        setStatusMsg('LISTENING...');
+      };
+
       recorder.start(120);
       audioRef.current.silenceRaf = requestAnimationFrame(detectSilence);
       setMicOn(true); setStatusMsg('LISTENING...'); setTranscript('— SPEAK TO VITA —'); setErrorMsg('');
@@ -611,7 +606,7 @@ export default function VitaOrb() {
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
       if (videoRef.current) { videoRef.current.srcObject = stream; await new Promise<void>(r => { videoRef.current!.onloadedmetadata = () => r(); }); }
       setCamOn(true); setErrorMsg('');
-      if (faceApiRef.current) { const fa = faceApiRef.current; const loop = async () => { if (!videoRef.current?.srcObject) return; try { const det = await fa.detectSingleFace(videoRef.current, new fa.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 })).withFaceExpressions(); if (det) { const dom = Object.entries(det.expressions).sort((a: any, b: any) => b[1] - a[1])[0]; if ((dom[1] as number) > 0.3) applyMood(dom[0]); } } catch {} detectTimer.current = setTimeout(loop, 250); }; loop(); }
+      if (faceApiRef.current) { const fa = faceApiRef.current; const loop = async () => { if (!videoRef.current?.srcObject) return; try { const det = await fa.detectSingleFace(videoRef.current, new fa.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 })).withFaceExpressions(); if (det) { const dom = Object.entries(det.expressions).sort((a: any, b: any) => b[1] - a[1])[0]; if ((dom[1] as number) > 0.3) applyMood(dom[0]); } } catch { } detectTimer.current = setTimeout(loop, 250); }; loop(); }
       else { setErrorMsg('AI MODELS FAILED — FEED ONLY'); startSimMood(); }
     } catch (err: any) { setCamOn(true); setErrorMsg(err.name === 'NotAllowedError' ? 'CAM DENIED — DEMO MOOD' : 'CAM UNAVAIL — DEMO MOOD'); startSimMood(); }
   }, [applyMood, startSimMood]);

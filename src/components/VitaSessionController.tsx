@@ -2,7 +2,54 @@
 
 import { useCallback, useEffect, useRef } from 'react';
 
-type RecognitionCtor = new () => SpeechRecognition;
+interface VitaSpeechRecognitionResult {
+  readonly transcript: string;
+}
+
+interface VitaSpeechRecognitionAlternative {
+  readonly transcript: string;
+}
+
+interface VitaSpeechRecognitionResultList {
+  readonly length: number;
+  [index: number]: VitaSpeechRecognitionResult & {
+    readonly 0: VitaSpeechRecognitionAlternative;
+  };
+}
+
+interface VitaSpeechRecognitionEvent extends Event {
+  readonly resultIndex: number;
+  readonly results: {
+    readonly length: number;
+    [index: number]: {
+      readonly length: number;
+      readonly 0: VitaSpeechRecognitionAlternative;
+    };
+  };
+}
+
+interface VitaSpeechRecognitionErrorEvent extends Event {
+  readonly error: string;
+}
+
+interface VitaSpeechRecognition {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  maxAlternatives: number;
+
+  onstart: (() => void) | null;
+  onaudiostart: (() => void) | null;
+  onresult: ((event: VitaSpeechRecognitionEvent) => void) | null;
+  onerror: ((event: VitaSpeechRecognitionErrorEvent) => void) | null;
+  onend: (() => void) | null;
+
+  start(): void;
+  stop(): void;
+  abort(): void;
+}
+
+type RecognitionCtor = new () => VitaSpeechRecognition;
 type VitaWindow = Window & typeof globalThis & {
   SpeechRecognition?: RecognitionCtor;
   webkitSpeechRecognition?: RecognitionCtor;
@@ -94,7 +141,7 @@ export default function VitaSessionController() {
   const controllerClickRef = useRef(false);
   const restartTimerRef = useRef<number | null>(null);
   const statusTimerRef = useRef<number | null>(null);
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const recognitionRef = useRef<VitaSpeechRecognition | null>(null);
   const startingRef = useRef(false);
   const micReadyRef = useRef(false);
   const lastTranscriptRef = useRef('');
@@ -103,7 +150,7 @@ export default function VitaSessionController() {
 
   const stopWakeRecognition = useCallback(() => {
     startingRef.current = false;
-    try { recognitionRef.current?.abort(); } catch {}
+    try { recognitionRef.current?.abort(); } catch { }
     recognitionRef.current = null;
   }, []);
 
