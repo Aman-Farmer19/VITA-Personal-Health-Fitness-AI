@@ -12,11 +12,7 @@ const TOOLS = [
     function: {
       name: "get_activity",
       description: "Read VITA's current activity and fitness metrics.",
-      parameters: {
-        type: "object",
-        properties: {},
-        additionalProperties: false,
-      },
+      parameters: { type: "object", properties: {}, additionalProperties: false },
     },
   },
   {
@@ -24,11 +20,7 @@ const TOOLS = [
     function: {
       name: "get_current_state",
       description: "Read VITA's current sensor, expression, and device state.",
-      parameters: {
-        type: "object",
-        properties: {},
-        additionalProperties: false,
-      },
+      parameters: { type: "object", properties: {}, additionalProperties: false },
     },
   },
   {
@@ -60,6 +52,22 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: "function" as const,
+    function: {
+      name: "build_daily_plan",
+      description: "Build a bounded daily fitness plan from live VITA state, step target, workout duration, and optional intensity.",
+      parameters: {
+        type: "object",
+        properties: {
+          targetSteps: { type: "number", description: "Daily step target." },
+          workoutMinutes: { type: "number", description: "Planned workout duration in minutes." },
+          intensity: { type: "string", enum: ["easy", "moderate", "hard"] },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
 const SYSTEM_PROMPT = `
@@ -79,6 +87,7 @@ Agent rules:
 - If the user asks about current steps, activity, device state, or fitness metrics, use the appropriate tool instead of guessing from memory.
 - If a workout is requested, use create_workout.
 - If the user asks how far they are from a step target, use estimate_goal_gap.
+- If the user asks for a daily plan, routine, today's plan, or what they should do next, use build_daily_plan.
 - You may call more than one tool when necessary.
 - After observing tool results, reason over them and produce one concise final answer.
 - Never claim that a tool performed an action it did not perform.
@@ -95,10 +104,7 @@ export async function POST(req: NextRequest) {
 
   try {
     if (!process.env.GROQ_API_KEY) {
-      return NextResponse.json(
-        { error: "GROQ_API_KEY is not configured." },
-        { status: 500 },
-      );
+      return NextResponse.json({ error: "GROQ_API_KEY is not configured." }, { status: 500 });
     }
 
     const body = await req.json();
@@ -106,10 +112,7 @@ export async function POST(req: NextRequest) {
     const vitaState = (body.vitaState ?? {}) as VitaState;
 
     if (!message) {
-      return NextResponse.json(
-        { error: "Message is required." },
-        { status: 400 },
-      );
+      return NextResponse.json({ error: "Message is required." }, { status: 400 });
     }
 
     const messages: any[] = [
@@ -122,8 +125,6 @@ export async function POST(req: NextRequest) {
 
     const toolsUsed: string[] = [];
 
-    // Bounded agent loop: tool calls are deliberate and capped so VITA
-    // remains fast and predictable rather than becoming an uncontrolled loop.
     for (let round = 0; round < 3; round += 1) {
       const completion = await groq.chat.completions.create({
         model: process.env.GROQ_MODEL || "qwen/qwen3.6-27b",
@@ -138,24 +139,14 @@ export async function POST(req: NextRequest) {
       const choice = completion.choices[0];
       const assistant = choice?.message;
 
-      if (!assistant) {
-        throw new Error("Groq returned an empty agent response.");
-      }
+      if (!assistant) throw new Error("Groq returned an empty agent response.");
 
       if (!assistant.tool_calls?.length) {
         const answer = assistant.content?.trim();
-
-        if (!answer) {
-          throw new Error("VITA produced an empty response.");
-        }
+        if (!answer) throw new Error("VITA produced an empty response.");
 
         console.log(`[VITA] Agent completed in ${Date.now() - started}ms`);
-
-        return NextResponse.json({
-          answer,
-          model: completion.model,
-          toolsUsed,
-        });
+        return NextResponse.json({ answer, model: completion.model, toolsUsed });
       }
 
       messages.push(assistant);
@@ -163,7 +154,6 @@ export async function POST(req: NextRequest) {
       for (const call of assistant.tool_calls) {
         const name = call.function.name;
         let args: Record<string, unknown> = {};
-
         try {
           args = JSON.parse(call.function.arguments || "{}");
         } catch {
@@ -184,13 +174,8 @@ export async function POST(req: NextRequest) {
     throw new Error("VITA reached the maximum tool-call rounds.");
   } catch (error: any) {
     console.error("[VITA AGENT ERROR]", error);
-
     return NextResponse.json(
-      {
-        error:
-          error?.message ||
-          "VITA could not process the request.",
-      },
+      { error: error?.message || "VITA could not process the request." },
       { status: 500 },
     );
   }
