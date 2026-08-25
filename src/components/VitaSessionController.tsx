@@ -43,7 +43,31 @@ type VitaWindow = Window & typeof globalThis & {
 };
 
 const STOP_PHRASE = /\bvita\s+stop\s+now\b/i;
-const WAKE_PHRASE = /^hello\s+vita[.!?]?$/i;
+
+// Browser Web Speech often hears "Vita" as "beta", "bita", "veta", etc.
+// Keep the wake word tolerant, but still require the two-word "hello <name>" shape.
+const WAKE_NAME_VARIANTS = new Set([
+  'vita',
+  'beta',
+  'bita',
+  'veta',
+  'vida',
+  'veeta',
+  'vitta',
+  'beeta',
+]);
+
+function isWakePhrase(text: string) {
+  const words = text
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (words.length < 2 || words[0] !== 'hello') return false;
+  return WAKE_NAME_VARIANTS.has(words[1]);
+}
 
 function getGreeting() {
   const hour = new Date().getHours();
@@ -170,8 +194,6 @@ export default function VitaSessionController() {
       utterance.voice = voice;
       utterance.lang = voice.lang;
     } else {
-      // Never silently select an arbitrary en-IN default voice.
-      // Browser voice lists are asynchronous; wait/retry instead.
       const retry = await getFemaleVoice();
       if (!retry) {
         console.warn('[VITA SESSION] No female English voice available; skipping greeting rather than using an arbitrary voice.');
@@ -245,7 +267,9 @@ export default function VitaSessionController() {
 
     startingRef.current = true;
     const recognition = new Recognition();
-    recognition.continuous = true;
+    // Wake listening is a single short utterance. Continuous mode caused
+    // unnecessary no-speech restart churn in Chrome.
+    recognition.continuous = false;
     recognition.interimResults = false;
     recognition.lang = 'en-IN';
     recognition.maxAlternatives = 1;
@@ -262,16 +286,23 @@ export default function VitaSessionController() {
       const text = result?.[0]?.transcript?.trim() ?? '';
       if (!text || activeRef.current || speechBusy()) return;
       console.log('[VITA WAKE]', text);
-      if (WAKE_PHRASE.test(text)) void activateSession();
+      if (isWakePhrase(text)) {
+        void activateSession();
+      }
     };
 
     recognition.onerror = (event) => {
       startingRef.current = false;
       recognitionRef.current = null;
-      console.warn('[VITA WAKE ERROR]', event.error);
+
+      if (event.error !== 'no-speech') {
+        console.warn('[VITA WAKE ERROR]', event.error);
+      }
+
       if (activeRef.current || event.error === 'not-allowed' || event.error === 'service-not-allowed') return;
+
       if (restartTimerRef.current) window.clearTimeout(restartTimerRef.current);
-      restartTimerRef.current = window.setTimeout(() => { void armWakeListener(); }, event.error === 'no-speech' ? 1200 : 700);
+      restartTimerRef.current = window.setTimeout(() => { void armWakeListener(); }, event.error === 'no-speech' ? 2500 : 1200);
     };
 
     recognition.onend = () => {
@@ -352,11 +383,7 @@ export default function VitaSessionController() {
           }
         }
 
-        if (
-          status === 'VITA READY' &&
-          lastStatus !== 'VITA READY' &&
-          !speechBusy()
-        ) {
+        if (status === 'VITA READY' && lastStatus !== 'VITA READY' && !speechBusy()) {
           window.setTimeout(() => {
             if (activeRef.current && !speechBusy()) clickVoiceButton();
           }, 900);
