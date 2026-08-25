@@ -45,25 +45,50 @@ export default function VitaOrb() {
   const [expression, setExpression] = useState('');
   const [stepSim, setStepSim] = useState(false);
   const [ttsVoices, setTtsVoices] = useState<SpeechSynthesisVoice[]>([]);
-  const threeRef = useRef<any>(null);
+
+  // Three.js state ref
+  const threeRef = useRef<{
+    renderer: any; composer: any; scene: any; camera: any; group: any;
+    core: any; coreMat: any; glows: any[];
+    sh1: any; sh2: any; sh3: any; s1m: any; s2m: any; s3m: any;
+    ri1: any; ri2: any; ri3: any; orbs: any[];
+    voiceAmp: number; stepBoost: number; moodColor: number; activityLevel: number;
+    mx: number; my: number; tx: number; ty: number; t: number; animId: number;
+  } | null>(null);
+
+  const audioRef = useRef<any>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const faceApiRef = useRef<any>(null);
+  const detectTimer = useRef<any>(null);
+  const simMoodTimer = useRef<any>(null);
+  const simEI = useRef(0);
+  const wsRef = useRef<WebSocket | null>(null);
+  const motionRef = useRef<any>(null);
+  const simStepTimer = useRef<any>(null);
+  const stepDetRef = useRef<any>(null);
 
   useEffect(() => {
     if (!('speechSynthesis' in window)) return;
-    const load = () => {
+
+    const loadVoices = () => {
       const voices = window.speechSynthesis.getVoices();
       setTtsVoices(voices);
-      const female = voices.find(v => /google uk english female|microsoft zira|microsoft heera|aria|jenny|samantha|susan|hazel|female|woman|girl/i.test(v.name) && /^en(-|_)/i.test(v.lang));
-      if (female) ttsVoiceRef.current = female;
-      console.log('[VITA] Available voices:', voices.map(v => `${v.name} (${v.lang})`));
-      if (female) console.log('[VITA] Locked voice:', female.name, female.lang);
+      console.log(
+        '[VITA] Available voices:',
+        voices.map(v => `${v.name} (${v.lang})`)
+      );
     };
-    load();
-    window.speechSynthesis.addEventListener('voiceschanged', load);
-    return () => window.speechSynthesis.removeEventListener('voiceschanged', load);
+
+    loadVoices();
+    window.speechSynthesis.addEventListener('voiceschanged', loadVoices);
+
+    return () => {
+      window.speechSynthesis.removeEventListener('voiceschanged', loadVoices);
+    };
   }, []);
 
   useEffect(() => {
-    fetch('/api/local-ip').then(r => r.json()).then(d => setLocalIP(d.ip)).catch(() => {});
+    fetch('/api/local-ip').then(r => r.json()).then(d => setLocalIP(d.ip)).catch(() => { });
   }, []);
 
   useEffect(() => {
@@ -98,13 +123,17 @@ export default function VitaOrb() {
     let cancelled = false;
     let resizeHandler: (() => void) | null = null;
     async function init() {
-      await document.fonts.load('700 16px "Space Mono"');
       if (cancelled) return;
+
+      // Core Three.js
       const THREE = await import('three');
+
+      // Post-processing — bloom
       const { EffectComposer } = await import('three/examples/jsm/postprocessing/EffectComposer.js');
       const { RenderPass } = await import('three/examples/jsm/postprocessing/RenderPass.js');
       const { UnrealBloomPass } = await import('three/examples/jsm/postprocessing/UnrealBloomPass.js');
       const { OutputPass } = await import('three/examples/jsm/postprocessing/OutputPass.js');
+
       if (cancelled) return;
       const container = containerRef.current!;
       const canvas = canvasRef.current!;
@@ -118,11 +147,25 @@ export default function VitaOrb() {
       scene.background = new THREE.Color(0x050510);
       const camera = new THREE.PerspectiveCamera(60, W / H, 0.1, 1000);
       camera.position.set(0, 0, 6);
+
+      // ── Bloom composer ──────────────────────────────────────────
+      const renderPass = new RenderPass(scene, camera);
+
+      const bloomPass = new UnrealBloomPass(
+        new THREE.Vector2(W, H),
+        0.5,   // strength  — was 1.4, toned way down
+        0.3,   // radius    — tighter glow spread
+        0.7    // threshold — higher = only bright core glows, not everything
+      );
+
+      const outputPass = new OutputPass();
+
       const composer = new EffectComposer(renderer);
-      composer.addPass(new RenderPass(scene, camera));
-      const bloomPass = new UnrealBloomPass(new THREE.Vector2(W, H), 0.45, 0.28, 0.72);
+      composer.addPass(renderPass);
       composer.addPass(bloomPass);
-      composer.addPass(new OutputPass());
+      composer.addPass(outputPass);
+
+      // ── Scene objects ───────────────────────────────────────────
       const group = new THREE.Group();
       scene.add(group);
       const coreMat = new THREE.MeshBasicMaterial({ color: 0xFF2D9A });
@@ -158,8 +201,18 @@ export default function VitaOrb() {
       for (let i = 0; i < pp.length; i++) pp[i] = (Math.random() - 0.5) * 30;
       const pg = new THREE.BufferGeometry();
       pg.setAttribute('position', new THREE.BufferAttribute(pp, 3));
-      scene.add(new THREE.Points(pg, new THREE.PointsMaterial({ color: 0x8888aa, size: 0.025, transparent: true, opacity: 0.45 })));
-      const state = { renderer, composer, scene, camera, core, coreMat, glows, sh1, sh2, sh3, s1m, s2m, s3m, ri1, ri2, ri3, orbs, voiceAmp: 0, stepBoost: 0, moodColor: 0xFF2D9A, activityLevel: 0, mx: 0, my: 0, tx: 0, ty: 0, t: 0, animId: 0 };
+      scene.add(new THREE.Points(pg, new THREE.PointsMaterial({ color: 0x8888aa, size: 0.025, transparent: true, opacity: 0.5 })));
+
+      // Background
+      scene.background = new THREE.Color(0x050510);
+
+      const state = {
+        renderer, composer, scene, camera, group,
+        core, coreMat, glows, sh1, sh2, sh3, s1m, s2m, s3m,
+        ri1, ri2, ri3, orbs,
+        voiceAmp: 0, stepBoost: 0, moodColor: 0xFF2D9A,
+        activityLevel: 0, mx: 0, my: 0, tx: 0, ty: 0, t: 0, animId: 0,
+      };
       threeRef.current = state;
       const mouse = (e: MouseEvent) => { const r = container.getBoundingClientRect(); state.mx = ((e.clientX - r.left) / r.width - 0.5) * 2; state.my = -((e.clientY - r.top) / r.height - 0.5) * 2; };
       container.addEventListener('mousemove', mouse);
@@ -174,7 +227,15 @@ export default function VitaOrb() {
         const sp = (1 + state.voiceAmp * 4) * actBoost;
         const pulse = (1 + Math.sin(state.t * 2.5) * 0.06) * (1 + state.voiceAmp * 2) * (1 + state.stepBoost * 0.4);
         core.scale.setScalar(pulse);
-        bloomPass.strength = Math.min(0.45 + state.voiceAmp * 0.65 + state.stepBoost * 0.35, 1.35);
+
+        // ── Phase 4: Dynamic bloom strength ────────────────────────
+        const dynamicBloom = 0.5
+          + state.voiceAmp * 0.8
+          + state.stepBoost * 0.5
+          + Math.sin(state.t * 2.5) * 0.05;
+        bloomPass.strength = Math.min(dynamicBloom, 1.8);
+
+        // Mood colour lerp
         const mc = new THREE.Color(state.moodColor);
         coreMat.color.lerp(mc, 0.05);
         glows.forEach((g, i) => { g.material.opacity = 0.12 / (i + 1) + state.voiceAmp * 0.08 + state.stepBoost * 0.05; g.scale.setScalar(1 + state.voiceAmp * 0.5 + state.stepBoost * 0.2); g.material.color.lerp(mc, 0.03); });
@@ -186,49 +247,141 @@ export default function VitaOrb() {
         else if (state.activityLevel === 1) { s1m.color.setHex(0x00FF88); s2m.color.setHex(0x00E5FF); }
         else if (state.voiceAmp > 0.1) { s1m.color.setHex(0xFF2D9A); s2m.color.setHex(0xFF8C00); }
         else { s1m.color.setHex(0x7C3AED); s2m.color.setHex(0x00E5FF); }
-        orbs.forEach(d => { d.userData.angle += d.userData.speed * 0.012 * sp; const a = d.userData.angle, rv = d.userData.radius; d.position.x = Math.cos(a) * rv; d.position.y = Math.sin(a * 0.5) * rv * d.userData.tilt; d.position.z = Math.sin(a) * rv; });
-        state.voiceAmp *= 0.88; state.stepBoost *= 0.85;
-        const now = performance.now();
-        if (now - lastFrame >= 33) { lastFrame = now; composer.render(); }
+
+        // Orbital debris
+        orbs.forEach(d => {
+          d.userData.angle += d.userData.speed * 0.012 * sp;
+          const a = d.userData.angle, rv = d.userData.radius;
+          d.position.x = Math.cos(a) * rv;
+          d.position.y = Math.sin(a * 0.5) * rv * d.userData.tilt;
+          d.position.z = Math.sin(a) * rv;
+        });
+
+        state.voiceAmp *= 0.88;
+        state.stepBoost *= 0.85;
+
+
+        // ── Use composer instead of renderer.render ─────────────────
+        const now = Date.now();
+        if (now - lastFrame < 33) return;
+        lastFrame = now;
+        composer.render();
       };
       animate();
-      resizeHandler = () => { const w = container.offsetWidth, h = container.offsetHeight; camera.aspect = w / h; camera.updateProjectionMatrix(); renderer.setSize(w, h); composer.setSize(w, h); bloomPass.resolution.set(w, h); };
-      window.addEventListener('resize', resizeHandler);
+
+      // Resize
+      window.addEventListener('resize', () => {
+        const W2 = container.offsetWidth, H2 = container.offsetHeight;
+        camera.aspect = W2 / H2;
+        camera.updateProjectionMatrix();
+        renderer.setSize(W2, H2);
+        composer.setSize(W2, H2);
+        bloomPass.resolution.set(W2, H2);
+      });
     }
-    requestAnimationFrame(() => requestAnimationFrame(init));
-    return () => { cancelled = true; if (resizeHandler) window.removeEventListener('resize', resizeHandler); if (threeRef.current) { cancelAnimationFrame(threeRef.current.animId); threeRef.current.renderer.dispose(); threeRef.current.composer.dispose(); } };
+
+    requestAnimationFrame(() => requestAnimationFrame(() => init()));
+
+    return () => {
+      cancelled = true;
+      if (threeRef.current) {
+        cancelAnimationFrame(threeRef.current.animId);
+        threeRef.current.renderer.dispose();
+      }
+    };
   }, []);
 
   useEffect(() => { const id = setInterval(() => setHeartRate(68 + Math.floor(Math.random() * 16)), 3000); return () => clearInterval(id); }, []);
 
-  const chooseVoice = useCallback(() => {
-    if (ttsVoiceRef.current) return ttsVoiceRef.current;
-    const voices = ttsVoices.length ? ttsVoices : window.speechSynthesis.getVoices();
-    const female = voices.find(v => /google uk english female|microsoft zira|microsoft heera|aria|jenny|samantha|susan|hazel|female|woman|girl/i.test(v.name) && /^en(-|_)/i.test(v.lang));
-    if (female) ttsVoiceRef.current = female;
-    return female ?? null;
-  }, [ttsVoices]);
+  // ── VITA AI AGENT ──────────────────────────
+  const speakVita = useCallback((text: string) => {
+    if (!('speechSynthesis' in window)) {
+      console.warn('[VITA] Speech synthesis unavailable');
+      return;
+    }
 
-  const speakVita = useCallback(async (text: string) => {
-    if (!('speechSynthesis' in window)) return;
     const speech = window.speechSynthesis;
-    speech.cancel(); speech.resume();
-    const voice = chooseVoice();
+
+    // Clear anything left in the queue.
+    speech.cancel();
+
+    // Chrome can remain paused after a previous interaction.
+    speech.resume();
+
     const utterance = new SpeechSynthesisUtterance(text);
-    if (voice) { utterance.voice = voice; utterance.lang = voice.lang; }
-    else utterance.lang = 'en-IN';
-    utterance.rate = 0.94; utterance.pitch = 1.06; utterance.volume = 1;
-    ttsActiveRef.current = true;
-    setStatusMsg('VITA SPEAKING...');
-    if (threeRef.current) threeRef.current.voiceAmp = 0.25;
+    const voices =
+      ttsVoices.length > 0
+        ? ttsVoices
+        : speech.getVoices();
+
+    const vitaVoice =
+      voices.find(
+        (v) =>
+          v.name.toLowerCase() === 'google uk english female' &&
+          v.lang.toLowerCase() === 'en-gb'
+      ) ||
+      voices.find(
+        (v) =>
+          /microsoft zira/i.test(v.name) &&
+          /^en-us$/i.test(v.lang)
+      ) ||
+      voices.find(
+        (v) =>
+          /female|aria|jenny|samantha|susan|hazel|woman|girl|cortana/i.test(v.name) &&
+          /^en(-|_)/i.test(v.lang)
+      );
+
+    if (vitaVoice) {
+      utterance.voice = vitaVoice;
+      utterance.lang = vitaVoice.lang;
+
+      console.log(
+        '[VITA] Selected voice:',
+        vitaVoice.name,
+        vitaVoice.lang
+      );
+    }
+
+    utterance.rate = 0.96;
+    utterance.pitch = 1.05;
+    utterance.volume = 1;
+
+    utterance.onstart = () => {
+      console.log('[VITA] TTS started');
+
+      setStatusMsg('VITA SPEAKING...');
+
+      if (threeRef.current) {
+        threeRef.current.voiceAmp = 0.25;
+      }
+    };
+
+    utterance.onend = () => {
+      console.log('[VITA] TTS finished');
+
+      setStatusMsg('VITA READY');
+
+      if (threeRef.current) {
+        threeRef.current.voiceAmp = 0;
+      }
+    };
+
+    utterance.onerror = (event) => {
+      console.error('[VITA TTS ERROR]', event);
+
+      setStatusMsg('VITA READY');
+
+      if (threeRef.current) {
+        threeRef.current.voiceAmp = 0;
+      }
+    };
+
     console.log('[VITA] Speaking:', text);
-    console.log('[VITA] Selected voice:', voice ? `${voice.name} (${voice.lang})` : 'en-IN fallback');
-    await new Promise<void>(resolve => {
-      utterance.onend = () => { ttsActiveRef.current = false; setStatusMsg('VITA READY'); if (threeRef.current) threeRef.current.voiceAmp = 0; setTimeout(resolve, 1000); };
-      utterance.onerror = e => { console.error('[VITA TTS ERROR]', e); ttsActiveRef.current = false; setStatusMsg('VITA READY'); if (threeRef.current) threeRef.current.voiceAmp = 0; resolve(); };
-      speech.speak(utterance);
-    });
-  }, [chooseVoice]);
+
+    // Resume immediately before speaking.
+    speech.resume();
+    speech.speak(utterance);
+  }, [ttsVoices]);
 
   const askVita = useCallback(async (message: string) => {
     try {
@@ -240,7 +393,8 @@ export default function VitaOrb() {
       console.log(`[VITA] /api/agent round trip: ${Math.round(performance.now() - started)}ms`);
       if (!res.ok) throw new Error(data.error || 'VITA agent failed');
       setTranscript(`"${data.answer}"`);
-      await speakVita(data.answer);
+      speakVita(data.answer);
+
       return data.answer;
     } catch (error) {
       console.error('[VITA]', error); setStatusMsg('VITA ERROR'); setErrorMsg('AI AGENT UNAVAILABLE'); return null;
@@ -248,14 +402,15 @@ export default function VitaOrb() {
   }, [stepData, mood, expression, micOn, camOn, stepsOn, phoneLinked, speakVita]);
 
   const startMic = useCallback(async () => {
-    if (ttsActiveRef.current || window.speechSynthesis?.speaking) {
-      console.log('[VITA] Mic start blocked while TTS is active.');
-      return;
-    }
-    if (audioRef.current) return;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1, sampleRate: 48000 } });
-      if (ttsActiveRef.current || window.speechSynthesis?.speaking) { stream.getTracks().forEach(t => t.stop()); return; }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+
       const ctx = new AudioContext();
       if (ctx.state === 'suspended') await ctx.resume();
       const analyser = ctx.createAnalyser();
@@ -271,13 +426,32 @@ export default function VitaOrb() {
       recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
       recorder.onstop = async () => {
         try {
-          if (audioRef.current?.recorder !== recorder) return;
-          setStatusMsg('TRANSCRIBING...'); setErrorMsg('');
-          const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
-          if (!blob.size) throw new Error('Empty recording');
-          const formData = new FormData(); formData.append('audio', blob, 'vita-voice.webm');
+          setStatusMsg('TRANSCRIBING...');
+          setErrorMsg('');
+
+          const blob = new Blob(chunks, {
+            type: recorder.mimeType || 'audio/webm',
+          });
+
+          if (blob.size === 0) {
+            throw new Error('Empty recording');
+          }
+
+          const formData = new FormData();
+
+          formData.append(
+            'audio',
+            blob,
+            'vita-voice.webm'
+          );
+
           const started = performance.now();
-          const response = await fetch('/api/transcribe', { method: 'POST', body: formData });
+
+          const response = await fetch('/api/transcribe', {
+            method: 'POST',
+            body: formData,
+          });
+
           const data = await response.json();
           console.log(`[VITA] Whisper round trip: ${Math.round(performance.now() - started)}ms`);
           if (!response.ok) throw new Error(data.error || 'Transcription failed');
@@ -286,34 +460,97 @@ export default function VitaOrb() {
           console.log('[VITA] Whisper:', text);
           setTranscript(`"${text.toUpperCase()}"`);
           await askVita(text);
+
         } catch (error) {
-          console.error('[VITA TRANSCRIPTION]', error); setStatusMsg('VITA ERROR'); setErrorMsg('TRANSCRIPTION FAILED');
+          console.error(
+            '[VITA TRANSCRIPTION]',
+            error
+          );
+
+          setStatusMsg('VITA ERROR');
+          setErrorMsg('TRANSCRIPTION FAILED');
+
         } finally {
-          cancelAnimationFrame(rafId); stream.getTracks().forEach(t => t.stop()); try { await ctx.close(); } catch {}
-          if (threeRef.current) threeRef.current.voiceAmp = 0;
-          audioRef.current = null; setMicOn(false);
+          stream.getTracks().forEach(
+            (track) => track.stop()
+          );
+
+          await ctx.close();
+
+          if (threeRef.current) {
+            threeRef.current.voiceAmp = 0;
+          }
+
+          audioRef.current = null;
+          setMicOn(false);
         }
       };
       let lastVoiceAt = 0;
       let hasSpoken = false;
-      const recordingStartedAt = performance.now();
-      const SILENCE_THRESHOLD = 0.045;
-      const SILENCE_DURATION = 1250;
-      const MIN_RECORDING_TIME = 750;
-      const MAX_RECORDING_TIME = 20000;
+
+      const SILENCE_THRESHOLD = 0.035;
+      const SILENCE_DURATION = 700;
+      const MIN_RECORDING_TIME = 500;
+      const MAX_RECORDING_TIME = 12000;
+
       const detectSilence = () => {
         if (!audioRef.current || audioRef.current.recorder !== recorder) return;
         const now = performance.now();
         analyser.getByteTimeDomainData(data);
         let sumSquares = 0;
-        for (let i = 0; i < data.length; i++) { const n = (data[i] - 128) / 128; sumSquares += n * n; }
-        const rms = Math.sqrt(sumSquares / data.length);
-        if (rms > SILENCE_THRESHOLD) { hasSpoken = true; lastVoiceAt = now; }
-        const duration = now - recordingStartedAt;
-        const silence = hasSpoken ? now - lastVoiceAt : 0;
-        if (hasSpoken && duration >= MIN_RECORDING_TIME && silence >= SILENCE_DURATION) { console.log('[VITA] Natural pause detected → stopping recording'); recorder.stop(); return; }
-        if (duration >= MAX_RECORDING_TIME) { console.log('[VITA] Max recording duration reached'); recorder.stop(); return; }
-        audioRef.current.silenceRaf = requestAnimationFrame(detectSilence);
+
+        for (let i = 0; i < data.length; i++) {
+          const normalized =
+            (data[i] - 128) / 128;
+
+          sumSquares += normalized * normalized;
+        }
+
+        const rms = Math.sqrt(
+          sumSquares / data.length
+        );
+
+        const speaking =
+          rms > SILENCE_THRESHOLD;
+
+        if (speaking) {
+          hasSpoken = true;
+          lastVoiceAt = now;
+        }
+
+        const recordingDuration =
+          now - recordingStartedAt;
+
+        const silenceDuration =
+          now - lastVoiceAt;
+
+        if (
+          hasSpoken &&
+          recordingDuration >= MIN_RECORDING_TIME &&
+          silenceDuration >= SILENCE_DURATION
+        ) {
+          console.log(
+            '[VITA] Silence detected → stopping recording'
+          );
+          setStatusMsg('TRANSCRIBING...');
+          recorder.stop();
+          return;
+        }
+
+        // Safety timeout
+        if (
+          recordingDuration >= MAX_RECORDING_TIME
+        ) {
+          console.log(
+            '[VITA] Maximum recording duration reached'
+          );
+
+          recorder.stop();
+          return;
+        }
+
+        audioRef.current.silenceRaf =
+          requestAnimationFrame(detectSilence);
       };
       audioRef.current = { ctx, analyser, data, rafId, stream, recorder, chunks, silenceRaf: 0 };
       recorder.start(120);
@@ -326,9 +563,44 @@ export default function VitaOrb() {
 
   const stopMic = useCallback(() => {
     const audio = audioRef.current;
-    if (!audio) { setMicOn(false); return; }
-    try { if (audio.silenceRaf) cancelAnimationFrame(audio.silenceRaf); if (audio.recorder?.state !== 'inactive') { setStatusMsg('TRANSCRIBING...'); audio.recorder.stop(); } }
-    catch (error) { console.error('[VITA STOP MIC]', error); audio.stream?.getTracks().forEach((t: MediaStreamTrack) => t.stop()); audio.ctx?.close(); audioRef.current = null; setMicOn(false); setStatusMsg('VITA READY'); }
+
+    if (!audio) {
+      setMicOn(false);
+      return;
+    }
+
+    try {
+      if (audio.silenceRaf) {
+        cancelAnimationFrame(
+          audio.silenceRaf
+        );
+      }
+
+      if (
+        audio.recorder &&
+        audio.recorder.state !== 'inactive'
+      ) {
+        setStatusMsg('TRANSCRIBING...');
+        audio.recorder.stop();
+      }
+    } catch (error) {
+      console.error(
+        '[VITA STOP MIC]',
+        error
+      );
+
+      audio.stream?.getTracks().forEach(
+        (track: MediaStreamTrack) =>
+          track.stop()
+      );
+
+      audio.ctx?.close();
+
+      audioRef.current = null;
+
+      setMicOn(false);
+      setStatusMsg('VITA READY');
+    }
   }, []);
 
   const applyMood = useCallback((key: string) => { const m = MOODS[key] || MOODS.neutral; setMood(m); setExpression(key.toUpperCase()); if (threeRef.current) threeRef.current.moodColor = m.threeHex; }, []);
