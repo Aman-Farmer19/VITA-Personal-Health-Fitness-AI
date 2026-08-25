@@ -1,3 +1,5 @@
+import { buildDailyPlan } from './vitaAgentPlan';
+
 export type VitaState = {
   steps?: number | null;
   cadence?: number | null;
@@ -120,6 +122,14 @@ export function executeVitaTool(
           remainingSteps: Math.max(target - steps, 0),
           completionPercent: Math.min((steps / target) * 100, 100),
         },
+      };
+    }
+
+    case 'build_daily_plan': {
+      return {
+        ok: true,
+        tool: name,
+        data: buildDailyPlan(state, args) as unknown as Record<string, unknown>,
       };
     }
 
