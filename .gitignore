@@ -22,3 +22,5 @@ Thumbs.db
 
 # Editor
 .vscode/
+
+/public/local-ip.json
