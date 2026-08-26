@@ -25,9 +25,9 @@ export async function POST(req: NextRequest) {
 
     const form = new FormData();
     form.append("file", audio, audio.name || "vita.webm");
-    // English-only Distil-Whisper is a better fit for VITA's command path:
-    // faster inference while retaining strong short-form accuracy.
-    form.append("model", "distil-whisper-large-v3-en");
+    // Groq has retired the old distil-whisper-large-v3-en endpoint.
+    // Turbo is the current fast production model and supports multilingual input.
+    form.append("model", "whisper-large-v3-turbo");
     form.append("language", "en");
     form.append("response_format", "text");
     form.append("temperature", "0");
