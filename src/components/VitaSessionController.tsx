@@ -2,10 +2,7 @@
 
 import { useCallback, useEffect, useRef } from 'react';
 
-interface VitaSpeechRecognitionAlternative {
-  readonly transcript: string;
-}
-
+interface VitaSpeechRecognitionAlternative { readonly transcript: string; }
 interface VitaSpeechRecognitionEvent extends Event {
   readonly resultIndex: number;
   readonly results: {
@@ -17,16 +14,13 @@ interface VitaSpeechRecognitionEvent extends Event {
     };
   };
 }
-
-interface VitaSpeechRecognitionErrorEvent extends Event {
-  readonly error: string;
-}
-
+interface VitaSpeechRecognitionErrorEvent extends Event { readonly error: string; }
 interface VitaSpeechRecognition {
   continuous: boolean;
   interimResults: boolean;
   lang: string;
   maxAlternatives: number;
+  processLocally?: boolean;
   onstart: (() => void) | null;
   onaudiostart: (() => void) | null;
   onresult: ((event: VitaSpeechRecognitionEvent) => void) | null;
@@ -37,41 +31,29 @@ interface VitaSpeechRecognition {
   abort(): void;
 }
 
-type RecognitionCtor = new () => VitaSpeechRecognition;
+type RecognitionCtor = (new () => VitaSpeechRecognition) & {
+  available?: (options: { langs: string[]; processLocally?: boolean; quality?: string }) => Promise<'available' | 'downloadable' | 'downloading' | 'unavailable'>;
+  install?: (options: { langs: string[]; quality?: string }) => Promise<boolean>;
+};
+
 type VitaWindow = Window & typeof globalThis & {
   SpeechRecognition?: RecognitionCtor;
   webkitSpeechRecognition?: RecognitionCtor;
 };
 
 const STOP_PHRASE = /\bvita\s+stop\s+now\b/i;
-
-const WAKE_NAME_VARIANTS = new Set([
-  'vita',
-  'beta',
-  'bita',
-  'veta',
-  'vida',
-  'veeta',
-  'vitta',
-  'beeta',
-]);
+const WAKE_NAME_VARIANTS = new Set(['vita', 'beta', 'bita', 'veta', 'vida', 'veeta', 'vitta', 'beeta']);
 
 function normalizeSpeech(text: string) {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return text.toLowerCase().replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function isWakePhrase(text: string) {
   const words = normalizeSpeech(text).split(' ').filter(Boolean);
   if (words.length < 2) return false;
-
   for (let i = 0; i < words.length - 1; i += 1) {
     if (words[i] === 'hello' && WAKE_NAME_VARIANTS.has(words[i + 1])) return true;
   }
-
   return false;
 }
 
@@ -85,7 +67,6 @@ function getGreeting() {
 
 async function getFemaleVoice(): Promise<SpeechSynthesisVoice | null> {
   if (!('speechSynthesis' in window)) return null;
-
   const speech = window.speechSynthesis;
   let voices = speech.getVoices();
 
@@ -103,44 +84,21 @@ async function getFemaleVoice(): Promise<SpeechSynthesisVoice | null> {
     });
   }
 
-  const patterns = [
-    /google uk english female/i,
-    /microsoft zira/i,
-    /microsoft heera/i,
-    /microsoft aria/i,
-    /jenny/i,
-    /samantha/i,
-    /susan/i,
-    /hazel/i,
-    /female|woman|girl/i,
-  ];
-
+  const patterns = [/google uk english female/i, /microsoft zira/i, /microsoft heera/i, /microsoft aria/i, /jenny/i, /samantha/i, /susan/i, /hazel/i, /female|woman|girl/i];
   const english = voices.filter((voice) => /^en(?:-|_)/i.test(voice.lang));
 
   for (const pattern of patterns) {
     const voice = english.find((candidate) => pattern.test(candidate.name) || pattern.test(candidate.voiceURI || ''));
     if (voice) return voice;
   }
-
   return null;
 }
 
-function getVoiceButton() {
-  return document.querySelector<HTMLButtonElement>('.hud-btn');
-}
+function getVoiceButton() { return document.querySelector<HTMLButtonElement>('.hud-btn'); }
 
 function getStatusText() {
-  const known = new Set([
-    'VITA READY',
-    'VITA ONLINE',
-    'LISTENING...',
-    'TRANSCRIBING...',
-    'VITA THINKING...',
-    'VITA SPEAKING...',
-  ]);
-  return Array.from(document.querySelectorAll('div, span')).find(
-    (node) => known.has(node.textContent?.trim() ?? ''),
-  )?.textContent?.trim() ?? '';
+  const known = new Set(['VITA READY', 'VITA ONLINE', 'LISTENING...', 'TRANSCRIBING...', 'VITA THINKING...', 'VITA SPEAKING...']);
+  return Array.from(document.querySelectorAll('div, span')).find((node) => known.has(node.textContent?.trim() ?? ''))?.textContent?.trim() ?? '';
 }
 
 function getTranscriptText() {
@@ -163,6 +121,7 @@ export default function VitaSessionController() {
   const ttsCooldownRef = useRef(false);
   const wakeBackoffRef = useRef(500);
   const destroyedRef = useRef(false);
+  const wakeModeRef = useRef<'local' | 'remote' | 'unknown'>('unknown');
 
   const speechBusy = useCallback(() => {
     if (!('speechSynthesis' in window)) return false;
@@ -189,21 +148,18 @@ export default function VitaSessionController() {
 
   const speakGreeting = useCallback(async () => {
     if (!('speechSynthesis' in window)) return;
-
     const speech = window.speechSynthesis;
     speech.cancel();
     speech.resume();
 
-    const voice = await getFemaleVoice();
+    const selectedVoice = await getFemaleVoice();
     const text = `${getGreeting()} What we are gonna do today, Boss?`;
-    const utterance = new SpeechSynthesisUtterance(text);
-    const selectedVoice = voice ?? (await getFemaleVoice());
-
     if (!selectedVoice) {
       console.warn('[VITA SESSION] No female English voice available; greeting skipped.');
       return;
     }
 
+    const utterance = new SpeechSynthesisUtterance(text);
     utterance.voice = selectedVoice;
     utterance.lang = selectedVoice.lang;
     utterance.rate = 0.98;
@@ -211,7 +167,6 @@ export default function VitaSessionController() {
     utterance.volume = 1;
 
     console.log('[VITA SESSION] Greeting voice:', `${selectedVoice.name} (${selectedVoice.lang})`);
-
     greetingRef.current = true;
     ttsCooldownRef.current = true;
 
@@ -234,7 +189,6 @@ export default function VitaSessionController() {
 
   const activateSession = useCallback(async () => {
     if (activeRef.current || speechBusy()) return;
-
     activeRef.current = true;
     wakeBackoffRef.current = 500;
     stopWakeRecognition();
@@ -249,9 +203,43 @@ export default function VitaSessionController() {
     }
   }, [clickVoiceButton, speakGreeting, speechBusy, stopWakeRecognition]);
 
+  const prepareWakeMode = useCallback(async (Recognition: RecognitionCtor) => {
+    if (wakeModeRef.current !== 'unknown') return wakeModeRef.current;
+
+    if (typeof Recognition.available !== 'function') {
+      wakeModeRef.current = 'remote';
+      console.log('[VITA WAKE] On-device recognition unavailable; using browser service.');
+      return wakeModeRef.current;
+    }
+
+    try {
+      const availability = await Recognition.available({ langs: ['en-US'], processLocally: true });
+      if (availability === 'available' || availability === 'downloading') {
+        wakeModeRef.current = 'local';
+        console.log('[VITA WAKE] MODE: ON-DEVICE');
+        return wakeModeRef.current;
+      }
+
+      if (availability === 'downloadable' && typeof Recognition.install === 'function') {
+        console.log('[VITA WAKE] Installing on-device English language pack...');
+        const installed = await Recognition.install({ langs: ['en-US'] });
+        if (installed) {
+          wakeModeRef.current = 'local';
+          console.log('[VITA WAKE] MODE: ON-DEVICE (language pack ready)');
+          return wakeModeRef.current;
+        }
+      }
+    } catch (error) {
+      console.warn('[VITA WAKE] On-device check failed; falling back to browser service.', error);
+    }
+
+    wakeModeRef.current = 'remote';
+    console.log('[VITA WAKE] MODE: BROWSER SERVICE');
+    return wakeModeRef.current;
+  }, []);
+
   const armWakeListener = useCallback(async () => {
-    if (destroyedRef.current) return;
-    if (activeRef.current || recognitionRef.current || startingRef.current || speechBusy()) return;
+    if (destroyedRef.current || activeRef.current || recognitionRef.current || startingRef.current || speechBusy()) return;
 
     const w = window as VitaWindow;
     const Recognition = w.SpeechRecognition ?? w.webkitSpeechRecognition;
@@ -273,12 +261,16 @@ export default function VitaSessionController() {
 
     if (speechBusy()) return;
 
+    const wakeMode = await prepareWakeMode(Recognition);
+    if (destroyedRef.current || activeRef.current || speechBusy()) return;
+
     startingRef.current = true;
     const recognition = new Recognition();
     recognition.continuous = true;
     recognition.interimResults = true;
-    recognition.lang = 'en-IN';
+    recognition.lang = wakeMode === 'local' ? 'en-US' : 'en-IN';
     recognition.maxAlternatives = 3;
+    if (wakeMode === 'local') recognition.processLocally = true;
 
     recognition.onstart = () => {
       startingRef.current = false;
@@ -293,7 +285,6 @@ export default function VitaSessionController() {
         const result = event.results[i];
         const text = result?.[0]?.transcript?.trim() ?? '';
         if (!text || activeRef.current || speechBusy()) continue;
-
         console.log('[VITA WAKE]', text, result?.isFinal ? '(final)' : '(interim)');
 
         if (isWakePhrase(text)) {
@@ -308,15 +299,20 @@ export default function VitaSessionController() {
       startingRef.current = false;
       recognitionRef.current = null;
 
-      if (event.error !== 'no-speech' && event.error !== 'aborted') {
+      if (event.error === 'language-not-supported' && wakeMode === 'local') {
+        wakeModeRef.current = 'remote';
+        console.warn('[VITA WAKE] Local language pack unavailable; falling back to browser service.');
+      } else if (event.error === 'network' && wakeMode === 'local') {
+        console.warn('[VITA WAKE] Local recognizer reported network; staying local and retrying slowly.');
+      } else if (event.error !== 'no-speech' && event.error !== 'aborted') {
         console.warn('[VITA WAKE ERROR]', event.error);
       }
 
       if (activeRef.current || event.error === 'not-allowed' || event.error === 'service-not-allowed') return;
 
       if (restartTimerRef.current) window.clearTimeout(restartTimerRef.current);
-      const delay = Math.min(wakeBackoffRef.current, 5000);
-      wakeBackoffRef.current = Math.min(wakeBackoffRef.current * 2, 5000);
+      const delay = event.error === 'network' ? 5000 : Math.min(wakeBackoffRef.current, 5000);
+      wakeBackoffRef.current = Math.min(Math.max(wakeBackoffRef.current * 2, 500), 5000);
       restartTimerRef.current = window.setTimeout(() => { void armWakeListener(); }, delay);
     };
 
@@ -340,7 +336,7 @@ export default function VitaSessionController() {
       recognitionRef.current = null;
       console.warn('[VITA WAKE] start() failed:', error);
     }
-  }, [activateSession, speechBusy, stopWakeRecognition]);
+  }, [activateSession, prepareWakeMode, speechBusy, stopWakeRecognition]);
 
   const deactivateSession = useCallback(() => {
     activeRef.current = false;
@@ -388,7 +384,6 @@ export default function VitaSessionController() {
 
   useEffect(() => {
     let lastStatus = '';
-
     const tick = () => {
       if (activeRef.current) {
         const status = getStatusText();
@@ -407,7 +402,6 @@ export default function VitaSessionController() {
             if (activeRef.current && !speechBusy()) clickVoiceButton();
           }, 900);
         }
-
         lastStatus = status;
       }
 
