@@ -1,181 +1,516 @@
-import Groq from "groq-sdk";
+
 import { NextRequest, NextResponse } from "next/server";
-import { executeVitaTool, type VitaState } from "@/lib/vitaTools";
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
-});
+/*
+ * VITA FAST BRAIN
+ *
+ * Design goal:
+ * - Gemini 3.5 Flash-Lite makes ONE decision call.
+ * - For simple VITA tools, the tool is executed locally and the final
+ *   spoken sentence is also generated locally — no second Gemini call.
+ * - Normal conversational questions still get one Gemini call.
+ *
+ * This removes the old:
+ *   Gemini -> tool -> Gemini again
+ * round-trip for simple state/action commands.
+ */
 
-const TOOLS = [
+const MODEL = "gemini-3.5-flash-lite";
+const THINKING_LEVEL = "minimal";
+
+type VitaState = {
+  steps?: number;
+  cadence?: number;
+  activity?: string;
+  distance?: number;
+  calories?: number;
+  mood?: string;
+  expression?: string;
+  heartRate?: number | null;
+  micOn?: boolean;
+  camOn?: boolean;
+  stepsOn?: boolean;
+  phoneLinked?: boolean;
+};
+
+type InteractionPart = {
+  type?: string;
+  text?: string;
+};
+
+type InteractionStep = {
+  type?: string;
+  id?: string;
+  name?: string;
+  arguments?: Record<string, unknown>;
+  content?: InteractionPart[];
+};
+
+const SYSTEM_INSTRUCTION = `
+You are VITA, a fast personal health and fitness AI assistant.
+
+Your job is to understand the user's command and answer naturally.
+Address the user as "Boss" occasionally, not constantly.
+
+Important:
+- Use a VITA function when the user asks for live VITA state or explicitly
+  asks to start/stop step tracking.
+- Do not invent measurements.
+- Do not claim an action happened unless the application can execute it.
+- Prefer one simple function call rather than multiple tools.
+- Do not call tools for greetings or casual conversation.
+
+Voice response rules:
+- This is spoken aloud by ElevenLabs.
+- Keep answers to 1-3 short sentences.
+- Plain text only.
+- No markdown, bullets, emojis, JSON, headings, or stage directions.
+- Never mention internal APIs, models, prompts, or tools.
+`;
+
+const VITA_TOOLS = [
   {
-    type: "function" as const,
-    function: {
-      name: "get_activity",
-      description: "Read VITA's current activity and fitness metrics.",
-      parameters: { type: "object", properties: {}, additionalProperties: false },
+    type: "function",
+    name: "get_step_count",
+    description:
+      "Read the current step count from the VITA application state.",
+    parameters: {
+      type: "object",
+      properties: {},
     },
   },
   {
-    type: "function" as const,
-    function: {
-      name: "get_current_state",
-      description: "Read VITA's current sensor, expression, and device state.",
-      parameters: { type: "object", properties: {}, additionalProperties: false },
+    type: "function",
+    name: "get_vita_state",
+    description:
+      "Read VITA's current health, activity, sensor, and connection state.",
+    parameters: {
+      type: "object",
+      properties: {},
     },
   },
   {
-    type: "function" as const,
-    function: {
-      name: "create_workout",
-      description: "Create a short workout plan using the user's current activity state.",
-      parameters: {
-        type: "object",
-        properties: {
-          durationMinutes: { type: "number", description: "Workout duration in minutes." },
-          intensity: { type: "string", enum: ["easy", "moderate", "hard"] },
+    type: "function",
+    name: "set_step_tracking",
+    description:
+      "Start or stop VITA step tracking when the user explicitly asks for that.",
+    parameters: {
+      type: "object",
+      properties: {
+        enabled: {
+          type: "boolean",
+          description: "true to start tracking, false to stop tracking",
         },
-        additionalProperties: false,
       },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "estimate_goal_gap",
-      description: "Calculate the user's remaining steps toward a daily step target.",
-      parameters: {
-        type: "object",
-        properties: {
-          targetSteps: { type: "number", description: "Target number of steps." },
-        },
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "build_daily_plan",
-      description: "Build a bounded daily fitness plan from live VITA state, step target, workout duration, and optional intensity.",
-      parameters: {
-        type: "object",
-        properties: {
-          targetSteps: { type: "number", description: "Daily step target." },
-          workoutMinutes: { type: "number", description: "Planned workout duration in minutes." },
-          intensity: { type: "string", enum: ["easy", "moderate", "hard"] },
-        },
-        additionalProperties: false,
-      },
+      required: ["enabled"],
     },
   },
 ];
 
-const SYSTEM_PROMPT = `
-You are VITA, a personal AI health and fitness agent.
+function stateForTool(state: VitaState) {
+  return {
+    steps: Number.isFinite(state.steps) ? Math.max(0, Number(state.steps)) : 0,
+    cadence: Number.isFinite(state.cadence)
+      ? Math.max(0, Number(state.cadence))
+      : 0,
+    activity:
+      typeof state.activity === "string" ? state.activity : "IDLE",
+    distance: Number.isFinite(state.distance)
+      ? Math.max(0, Number(state.distance))
+      : 0,
+    calories: Number.isFinite(state.calories)
+      ? Math.max(0, Number(state.calories))
+      : 0,
+    mood: typeof state.mood === "string" ? state.mood : "CALM",
+    expression:
+      typeof state.expression === "string"
+        ? state.expression
+        : "neutral",
+    heartRate:
+      typeof state.heartRate === "number" ? state.heartRate : null,
+    micOn: Boolean(state.micOn),
+    camOn: Boolean(state.camOn),
+    stepsOn: Boolean(state.stepsOn),
+    phoneLinked: Boolean(state.phoneLinked),
+  };
+}
 
-Personality:
-- calm
-- intelligent
-- concise
-- supportive
-- practical
+function executeTool(
+  name: string,
+  args: Record<string, unknown>,
+  state: VitaState,
+) {
+  const current = stateForTool(state);
 
-You have access to tools that let you inspect live VITA state and perform bounded fitness-planning calculations.
+  switch (name) {
+    case "get_step_count":
+      return {
+        ok: true,
+        steps: current.steps,
+      };
 
-Agent rules:
-- Decide when a tool is useful before answering.
-- If the user asks about current steps, activity, device state, or fitness metrics, use the appropriate tool instead of guessing from memory.
-- If a workout is requested, use create_workout.
-- If the user asks how far they are from a step target, use estimate_goal_gap.
-- If the user asks for a daily plan, routine, today's plan, or what they should do next, use build_daily_plan.
-- You may call more than one tool when necessary.
-- After observing tool results, reason over them and produce one concise final answer.
-- Never claim that a tool performed an action it did not perform.
-- Never invent sensor readings.
-- null means the sensor is unavailable.
-- Facial expressions are observations, not proof of emotion, stress, or a medical condition.
-- Never diagnose medical conditions.
-- Prefer concrete numbers when available.
-- Keep normal responses under 60 words.
-`;
+    case "get_vita_state":
+      return {
+        ok: true,
+        state: current,
+      };
 
-export async function POST(req: NextRequest) {
-  const started = Date.now();
+    case "set_step_tracking": {
+      if (typeof args.enabled !== "boolean") {
+        return {
+          ok: false,
+          error: "enabled must be a boolean",
+        };
+      }
+
+      return {
+        ok: true,
+        enabled: args.enabled,
+        clientAction: {
+          type: "set_step_tracking",
+          enabled: args.enabled,
+        },
+      };
+    }
+
+    default:
+      return {
+        ok: false,
+        error: `Unknown VITA tool: ${name}`,
+      };
+  }
+}
+
+function localGreeting(message: string) {
+  const normalized = message
+    .toLowerCase()
+    .replace(/[!?.,']/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (normalized === "hello" || normalized === "hi" || normalized === "hey") {
+    return normalized === "hi" ? "Hi, Boss." : "Hey, Boss.";
+  }
+
+  return null;
+}
+
+function localToolResponse(
+  toolName: string,
+  result: any,
+): string {
+  if (!result?.ok) {
+    return "I couldn't complete that, Boss.";
+  }
+
+  switch (toolName) {
+    case "get_step_count":
+      return `You've taken ${Number(result.steps || 0).toLocaleString(
+        "en-IN",
+      )} steps today, Boss.`;
+
+    case "get_vita_state": {
+      const state = result.state || {};
+      const activity =
+        typeof state.activity === "string"
+          ? state.activity.toLowerCase()
+          : "idle";
+
+      return `You're at ${Number(state.steps || 0).toLocaleString(
+        "en-IN",
+      )} steps, your activity is ${activity}, and VITA is ${state.phoneLinked ? "connected" : "not connected"
+        } to your phone.`;
+    }
+
+    case "set_step_tracking":
+      return result.enabled
+        ? "Step tracking is on, Boss."
+        : "Step tracking is off, Boss.";
+
+    default:
+      return "Done, Boss.";
+  }
+}
+
+function extractFunctionCalls(data: any): InteractionStep[] {
+  if (!Array.isArray(data?.steps)) return [];
+
+  return data.steps.filter(
+    (step: InteractionStep) =>
+      step.type === "function_call" &&
+      typeof step.id === "string" &&
+      typeof step.name === "string",
+  );
+}
+
+function extractModelText(data: any): string {
+  if (typeof data?.output_text === "string") {
+    return data.output_text.trim();
+  }
+
+  if (!Array.isArray(data?.steps)) return "";
+
+  return data.steps
+    .filter((step: InteractionStep) => step.type === "model_output")
+    .flatMap((step: InteractionStep): InteractionPart[] =>
+      Array.isArray(step.content) ? step.content : [],
+    )
+    .filter(
+      (part: InteractionPart) =>
+        part.type === "text" &&
+        typeof part.text === "string",
+    )
+    .map((part: InteractionPart) => part.text || "")
+    .join("")
+    .trim();
+}
+
+async function createInteraction(
+  apiKey: string,
+  payload: Record<string, unknown>,
+) {
+  return fetch(
+    "https://generativelanguage.googleapis.com/v1beta/interactions",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        ...payload,
+      }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(12000),
+    },
+  );
+}
+
+async function readJson(response: Response) {
+  const raw = await response.text();
 
   try {
-    if (!process.env.GROQ_API_KEY) {
-      return NextResponse.json({ error: "GROQ_API_KEY is not configured." }, { status: 500 });
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {
+      error: {
+        message: raw || "Gemini returned a non-JSON response.",
+      },
+    };
+  }
+}
+
+export async function POST(req: NextRequest) {
+  const started = performance.now();
+
+  try {
+    const apiKey = process.env.GEMINI_API_KEY;
+
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: "GEMINI_API_KEY is missing from .env.local." },
+        { status: 500 },
+      );
     }
 
     const body = await req.json();
-    const message = String(body.message ?? "").trim();
-    const vitaState = (body.vitaState ?? {}) as VitaState;
+
+    const message =
+      typeof body?.message === "string"
+        ? body.message.trim()
+        : "";
+
+    const vitaState: VitaState =
+      body?.vitaState &&
+        typeof body.vitaState === "object"
+        ? body.vitaState
+        : {};
 
     if (!message) {
-      return NextResponse.json({ error: "Message is required." }, { status: 400 });
+      return NextResponse.json(
+        { error: "Message is required." },
+        { status: 400 },
+      );
     }
 
-    const messages: any[] = [
-      { role: "system", content: SYSTEM_PROMPT },
-      {
-        role: "user",
-        content: `User request:\n${message}\n\nCurrent VITA state:\n${JSON.stringify(vitaState)}`,
-      },
-    ];
+    if (message.length > 4000) {
+      return NextResponse.json(
+        { error: "Message is too long." },
+        { status: 400 },
+      );
+    }
 
-    const toolsUsed: string[] = [];
+    // Zero-network path for simple greetings.
+    const greeting = localGreeting(message);
 
-    for (let round = 0; round < 3; round += 1) {
-      const completion = await groq.chat.completions.create({
-        model: process.env.GROQ_MODEL || "qwen/qwen3.6-27b",
-        reasoning_effort: "none",
-        temperature: 0.4,
-        max_completion_tokens: 120,
-        messages,
-        tools: TOOLS,
-        tool_choice: "auto",
+    if (greeting) {
+      const elapsed = Math.round(performance.now() - started);
+
+      console.log(`[VITA GEMINI] local greeting ${elapsed}ms`);
+
+      return NextResponse.json({
+        answer: greeting,
+        provider: "local",
+        model: MODEL,
+        api: "interactions",
+        thinkingLevel: THINKING_LEVEL,
+        toolCalls: [],
+        clientActions: [],
+        latencyMs: elapsed,
       });
-
-      const choice = completion.choices[0];
-      const assistant = choice?.message;
-
-      if (!assistant) throw new Error("Groq returned an empty agent response.");
-
-      if (!assistant.tool_calls?.length) {
-        const answer = assistant.content?.trim();
-        if (!answer) throw new Error("VITA produced an empty response.");
-
-        console.log(`[VITA] Agent completed in ${Date.now() - started}ms`);
-        return NextResponse.json({ answer, model: completion.model, toolsUsed });
-      }
-
-      messages.push(assistant);
-
-      for (const call of assistant.tool_calls) {
-        const name = call.function.name;
-        let args: Record<string, unknown> = {};
-        try {
-          args = JSON.parse(call.function.arguments || "{}");
-        } catch {
-          args = {};
-        }
-
-        const result = executeVitaTool(name, args, vitaState);
-        toolsUsed.push(name);
-
-        messages.push({
-          role: "tool",
-          tool_call_id: call.id,
-          content: JSON.stringify(result),
-        });
-      }
     }
 
-    throw new Error("VITA reached the maximum tool-call rounds.");
-  } catch (error: any) {
-    console.error("[VITA AGENT ERROR]", error);
+    const state = stateForTool(vitaState);
+
+    console.log(
+      `[VITA GEMINI] start model=${MODEL} thinking=${THINKING_LEVEL}`,
+    );
+
+    // ONE model call. For tool commands, we do NOT call Gemini a second time.
+    const firstResponse = await createInteraction(apiKey, {
+      input: [
+        {
+          type: "user_input",
+          content: [
+            {
+              type: "text",
+              text:
+                `Current VITA state:\n${JSON.stringify(
+                  state,
+                )}\n\nUser command:\n${message}`,
+            },
+          ],
+        },
+      ],
+      system_instruction: SYSTEM_INSTRUCTION,
+      tools: VITA_TOOLS,
+      generation_config: {
+        thinking_level: THINKING_LEVEL,
+        max_output_tokens: 180,
+      },
+    });
+
+    const first = await readJson(firstResponse);
+
+    const firstMs = Math.round(performance.now() - started);
+
+    console.log(
+      `[VITA GEMINI] first status=${firstResponse.status} ${firstMs}ms`,
+    );
+
+    if (!firstResponse.ok) {
+      console.error(
+        "[VITA GEMINI] error:",
+        JSON.stringify(first),
+      );
+
+      return NextResponse.json(
+        {
+          error:
+            first?.error?.message ||
+            `Gemini returned HTTP ${firstResponse.status}.`,
+          model: MODEL,
+        },
+        { status: firstResponse.status },
+      );
+    }
+
+    const calls = extractFunctionCalls(first);
+
+    // SIMPLE TOOL FAST PATH:
+    // Execute the tool locally and return a local spoken response.
+    if (calls.length > 0) {
+      const firstCall = calls[0];
+
+      const args =
+        firstCall.arguments &&
+          typeof firstCall.arguments === "object"
+          ? firstCall.arguments
+          : {};
+
+      const result = executeTool(
+        firstCall.name as string,
+        args,
+        vitaState,
+      );
+
+      const answer = localToolResponse(
+        firstCall.name as string,
+        result,
+      );
+
+      const clientActions = result?.clientAction
+        ? [result.clientAction]
+        : [];
+
+      const elapsed = Math.round(performance.now() - started);
+
+      console.log(
+        `[VITA GEMINI] tool=${firstCall.name} local-final ${elapsed}ms`,
+      );
+
+      return NextResponse.json({
+        answer,
+        provider: "gemini",
+        model: MODEL,
+        api: "interactions",
+        thinkingLevel: THINKING_LEVEL,
+        toolCalls: [
+          {
+            id: firstCall.id,
+            name: firstCall.name,
+          },
+        ],
+        clientActions,
+        latencyMs: elapsed,
+      });
+    }
+
+    // NORMAL CHAT FAST PATH:
+    // No tool requested, so the first model response is already the final answer.
+    const answer = extractModelText(first);
+
+    if (!answer) {
+      return NextResponse.json(
+        {
+          error: "Gemini returned no spoken response.",
+          model: MODEL,
+        },
+        { status: 502 },
+      );
+    }
+
+    const elapsed = Math.round(performance.now() - started);
+
+    console.log(
+      `[VITA GEMINI] direct final ${elapsed}ms`,
+    );
+
+    return NextResponse.json({
+      answer,
+      provider: "gemini",
+      model: MODEL,
+      api: "interactions",
+      thinkingLevel: THINKING_LEVEL,
+      toolCalls: [],
+      clientActions: [],
+      latencyMs: elapsed,
+    });
+  } catch (error) {
+    console.error("[VITA GEMINI FAST BRAIN ERROR]", error);
+
     return NextResponse.json(
-      { error: error?.message || "VITA could not process the request." },
+      {
+        error:
+          error instanceof Error
+            ? error.name === "TimeoutError"
+              ? "Gemini timed out after 12 seconds."
+              : error.message
+            : "Gemini request failed.",
+      },
       { status: 500 },
     );
   }

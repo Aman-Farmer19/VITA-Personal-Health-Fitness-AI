@@ -1,76 +1,123 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const GROQ_TTS_URL = "https://api.groq.com/openai/v1/audio/speech";
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-export async function GET() {
-  return NextResponse.json({ ok: true, service: "speak" });
+const DEFAULT_MODEL = "eleven_flash_v2_5";
+const DEFAULT_OUTPUT_FORMAT = "mp3_22050_32";
+
+async function streamSpeech(text: string) {
+  const apiKey = process.env.ELEVENLABS_API_KEY;
+  const voiceId = process.env.VITA_TTS_VOICE_ID;
+  const modelId = process.env.VITA_TTS_MODEL || DEFAULT_MODEL;
+
+  if (!apiKey) {
+    return NextResponse.json(
+      { error: "ELEVENLABS_API_KEY is missing from .env.local." },
+      { status: 500 },
+    );
+  }
+
+  if (!voiceId) {
+    return NextResponse.json(
+      { error: "VITA_TTS_VOICE_ID is missing from .env.local." },
+      { status: 500 },
+    );
+  }
+
+  if (!text) {
+    return NextResponse.json(
+      { error: "TTS text is required." },
+      { status: 400 },
+    );
+  }
+
+  if (text.length > 2500) {
+    return NextResponse.json(
+      { error: "TTS text is too long." },
+      { status: 400 },
+    );
+  }
+
+  const url =
+    `https://api.elevenlabs.io/v1/text-to-speech/` +
+    `${encodeURIComponent(voiceId)}/stream` +
+    `?output_format=${encodeURIComponent(DEFAULT_OUTPUT_FORMAT)}`;
+
+  console.log(
+    `[VITA TTS] ElevenLabs stream request: voice=${voiceId} model=${modelId}`,
+  );
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "xi-api-key": apiKey,
+      "Content-Type": "application/json",
+      Accept: "audio/mpeg",
+    },
+    body: JSON.stringify({
+      text,
+      model_id: modelId,
+      voice_settings: {
+        stability: 0.45,
+        similarity_boost: 0.8,
+        style: 0.15,
+        use_speaker_boost: true,
+      },
+    }),
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+
+    console.error(
+      `[VITA TTS] ElevenLabs ${response.status}:`,
+      errorText,
+    );
+
+    return new NextResponse(errorText || "ElevenLabs TTS failed.", {
+      status: response.status,
+      headers: {
+        "Content-Type": response.headers.get("content-type") || "text/plain",
+      },
+    });
+  }
+
+  if (!response.body) {
+    return NextResponse.json(
+      { error: "ElevenLabs returned no audio stream." },
+      { status: 502 },
+    );
+  }
+
+  return new Response(response.body, {
+    status: 200,
+    headers: {
+      "Content-Type":
+        response.headers.get("content-type") || "audio/mpeg",
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+      "Transfer-Encoding": "chunked",
+    },
+  });
+}
+
+export async function GET(req: NextRequest) {
+  const text = req.nextUrl.searchParams.get("text")?.trim() || "";
+  return streamSpeech(text);
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const apiKey = process.env.GROQ_API_KEY;
-
-    if (!apiKey) {
-      return NextResponse.json(
-        { error: "GROQ_API_KEY is not configured." },
-        { status: 500 }
-      );
-    }
-
     const body = await req.json();
-    const input = String(body?.text ?? "").trim();
+    const text =
+      typeof body?.text === "string" ? body.text.trim() : "";
 
-    if (!input) {
-      return NextResponse.json(
-        { error: "Text is required." },
-        { status: 400 }
-      );
-    }
-
-    const response = await fetch(GROQ_TTS_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "canopylabs/orpheus-v1-english",
-        voice: "hannah",
-        input: input.slice(0, 200),
-        response_format: "wav",
-      }),
-      cache: "no-store",
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.warn("[VITA TTS] Groq unavailable:", errorText);
-
-      return NextResponse.json(
-        {
-          error: errorText || "Groq TTS unavailable.",
-          code: "tts_unavailable",
-        },
-        { status: 503 }
-      );
-    }
-
-    const audio = await response.arrayBuffer();
-
-    return new NextResponse(audio, {
-      status: 200,
-      headers: {
-        "Content-Type": "audio/wav",
-        "Cache-Control": "no-store",
-      },
-    });
-  } catch (error: any) {
+    return streamSpeech(text);
+  } catch {
     return NextResponse.json(
-      {
-        error:
-          error?.message || "VITA speech generation failed.",
-      },
-      { status: 500 }
+      { error: "Invalid TTS request body." },
+      { status: 400 },
     );
   }
 }
