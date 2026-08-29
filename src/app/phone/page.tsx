@@ -1,20 +1,20 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { StepDetector, type StepData } from '@/lib/stepDetector';
+import { StepDetector, type StepData } from '../../lib/stepDetector';
 
 type ConnState = 'connecting' | 'connected' | 'disconnected' | 'error';
 type TrackState = 'idle' | 'active' | 'denied' | 'unsupported';
 
 export default function PhonePage() {
-  const [connState, setConnState]   = useState<ConnState>('connecting');
+  const [connState, setConnState] = useState<ConnState>('connecting');
   const [trackState, setTrackState] = useState<TrackState>('idle');
-  const [stepData, setStepData]     = useState<StepData>({ steps: 0, cadence: 0, activity: 'IDLE', distance: 0, calories: 0 });
-  const [laptopIP, setLaptopIP]     = useState('');
+  const [stepData, setStepData] = useState<StepData>({ steps: 0, cadence: 0, activity: 'IDLE', distance: 0, calories: 0 });
+  const [laptopIP, setLaptopIP] = useState('');
 
-  const wsRef        = useRef<WebSocket | null>(null);
-  const detectorRef  = useRef(new StepDetector());
-  const motionRef    = useRef<((e: DeviceMotionEvent) => void) | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const detectorRef = useRef(new StepDetector());
+  const motionRef = useRef<((e: DeviceMotionEvent) => void) | null>(null);
 
   // ── WebSocket connection ─────────────────────────────────────────
   const connect = useCallback(() => {
@@ -22,7 +22,7 @@ export default function PhonePage() {
     const ws = new WebSocket(`ws://${window.location.host}/vita-ws?type=phone`);
     wsRef.current = ws;
 
-    ws.onopen  = () => setConnState('connected');
+    ws.onopen = () => setConnState('connected');
     ws.onclose = () => { setConnState('disconnected'); setTimeout(connect, 3000); }; // auto-reconnect
     ws.onerror = () => setConnState('error');
   }, []);
@@ -88,13 +88,13 @@ export default function PhonePage() {
 
   // ── Colours ──────────────────────────────────────────────────────
   const connColour: Record<ConnState, string> = {
-    connecting:    '#FFD700',
-    connected:     '#00FF88',
-    disconnected:  '#FF2D9A',
-    error:         '#FF2D2D',
+    connecting: '#FFD700',
+    connected: '#00FF88',
+    disconnected: '#FF2D9A',
+    error: '#FF2D2D',
   };
   const actColour: Record<string, string> = {
-    IDLE:    '#00E5FF',
+    IDLE: '#00E5FF',
     WALKING: '#00FF88',
     RUNNING: '#FFD700',
   };
@@ -128,10 +128,10 @@ export default function PhonePage() {
           animation: connState === 'connected' ? 'pulse 1.5s infinite' : 'none',
           flexShrink: 0,
         }} />
-        {connState === 'connecting'   && 'CONNECTING TO VITA...'}
-        {connState === 'connected'    && 'LINKED TO LAPTOP ✓'}
+        {connState === 'connecting' && 'CONNECTING TO VITA...'}
+        {connState === 'connected' && 'LINKED TO LAPTOP ✓'}
         {connState === 'disconnected' && 'RECONNECTING...'}
-        {connState === 'error'        && 'CONNECTION ERROR'}
+        {connState === 'error' && 'CONNECTION ERROR'}
       </div>
 
       {/* ── Step Ring ── */}
@@ -171,8 +171,8 @@ export default function PhonePage() {
       }}>
         {[
           { label: 'ACTIVITY', value: stepData.activity, color: actColour[stepData.activity] },
-          { label: 'CADENCE',  value: `${stepData.cadence} spm`, color: '#FFD700' },
-          { label: 'DISTANCE', value: `${stepData.distance} km`,  color: '#00E5FF' },
+          { label: 'CADENCE', value: `${stepData.cadence} spm`, color: '#FFD700' },
+          { label: 'DISTANCE', value: `${stepData.distance} km`, color: '#00E5FF' },
           { label: 'CALORIES', value: `${stepData.calories} kcal`, color: '#7C3AED' },
         ].map(({ label, value, color }) => (
           <div key={label}>

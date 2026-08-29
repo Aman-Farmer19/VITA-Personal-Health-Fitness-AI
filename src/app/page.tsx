@@ -1,8 +1,8 @@
 import dynamic from 'next/dynamic';
-import VitaSessionController from '@/components/VitaSessionController';
+import VitaSessionController from '../components/VitaSessionController';
 
 // Dynamically import VitaOrb — disables SSR for Three.js
-const VitaOrb = dynamic(() => import('@/components/VitaOrb'), { ssr: false });
+const VitaOrb = dynamic(() => import('../components/VitaOrb'), { ssr: false });
 
 export default function Home() {
   return (

@@ -1,7 +1,7 @@
-'use client';
 
+'use client';
 import { useEffect, useRef, useState, useCallback } from 'react';
-import type { StepData } from '@/lib/stepDetector';
+import type { StepData } from '../lib/stepDetector';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types & Constants
@@ -67,6 +67,26 @@ export default function VitaOrb() {
   const ttsRequestIdRef = useRef(0);
   const ttsCooldownUntilRef = useRef(0);
   const ttsActiveRef = useRef(false);
+  const ttsInFlightRef = useRef(false);
+
+  // Gemini Live Transcription state
+  const liveWsRef = useRef<WebSocket | null>(null);
+  const liveStreamRef = useRef<MediaStream | null>(null);
+  const liveAudioContextRef = useRef<AudioContext | null>(null);
+  const liveSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const liveWorkletRef = useRef<AudioWorkletNode | null>(null);
+  const liveSetupCompleteRef = useRef(false);
+  const liveStoppingRef = useRef(false);
+  const liveHasSpokenRef = useRef(false);
+  const liveLastVoiceAtRef = useRef(0);
+  const liveStartedAtRef = useRef(0);
+  const liveFinalTextRef = useRef('');
+  const liveFinalizingRef = useRef(false);
+  const liveEndSentRef = useRef(false);
+  const liveTurnCompletedRef = useRef(false);
+  const liveWaitingForTurnCompleteRef = useRef(false);
+  const liveLastFinalChunkRef = useRef('');
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const faceApiRef = useRef<any>(null);
   const detectTimer = useRef<any>(null);
@@ -79,6 +99,25 @@ export default function VitaOrb() {
 
   useEffect(() => {
     return () => {
+      liveStoppingRef.current = true;
+
+      liveWorkletRef.current?.disconnect();
+      liveSourceRef.current?.disconnect();
+      liveStreamRef.current?.getTracks().forEach((track) => track.stop());
+
+      if (liveWsRef.current && liveWsRef.current.readyState !== WebSocket.CLOSED) {
+        try { liveWsRef.current.close(1000, 'component unmounted'); } catch { }
+      }
+
+      void liveAudioContextRef.current?.close();
+
+      liveWsRef.current = null;
+      liveTurnCompletedRef.current = false;
+      liveWorkletRef.current = null;
+      liveSourceRef.current = null;
+      liveStreamRef.current = null;
+      liveAudioContextRef.current = null;
+
       if (ttsAudioContextRef.current) {
         void ttsAudioContextRef.current.close();
         ttsAudioContextRef.current = null;
@@ -370,14 +409,552 @@ export default function VitaOrb() {
     return 'Good evening, Boss.';
   }, []);
 
+  // ── PHASE 1: Voice / Gemini Live Transcription ───────────────────
+  function pcm16ToBase64(input: Int16Array): string {
+    const bytes = new Uint8Array(
+      input.buffer,
+      input.byteOffset,
+      input.byteLength,
+    );
+
+    let binary = '';
+    const chunkSize = 0x8000;
+
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(
+        i,
+        Math.min(i + chunkSize, bytes.length),
+      );
+
+      for (let j = 0; j < chunk.length; j += 1) {
+        binary += String.fromCharCode(chunk[j]);
+      }
+    }
+
+    return btoa(binary);
+  }
+
+  const stopLiveTranscription = useCallback(async (
+    sendStreamEnd = true,
+    keepWebSocket = false,
+  ) => {
+    liveStoppingRef.current = true;
+
+    const ws = liveWsRef.current;
+
+    if (sendStreamEnd && ws?.readyState === WebSocket.OPEN) {
+      liveEndSentRef.current = true;
+      try {
+        ws.send(
+          JSON.stringify({
+            realtimeInput: {
+              audioStreamEnd: true,
+            },
+          }),
+        );
+        console.log('[VITA LIVE STT] audioStreamEnd sent');
+      } catch { }
+    }
+
+    liveWorkletRef.current?.disconnect();
+    liveSourceRef.current?.disconnect();
+
+    liveStreamRef.current?.getTracks().forEach((track) => track.stop());
+    liveStreamRef.current = null;
+
+    if (liveAudioContextRef.current) {
+      await liveAudioContextRef.current.close().catch(() => undefined);
+      liveAudioContextRef.current = null;
+    }
+
+    liveWorkletRef.current = null;
+    liveSourceRef.current = null;
+    liveSetupCompleteRef.current = false;
+
+    if (
+      !keepWebSocket &&
+      ws &&
+      ws.readyState !== WebSocket.CLOSED
+    ) {
+      try {
+        ws.close(1000, 'VITA turn complete');
+      } catch { }
+    }
+
+    if (!keepWebSocket) {
+      liveWsRef.current = null;
+    }
+    setMicOn(false);
+    setStatusMsg('VITA READY');
+  }, []);
+
+  const processLiveFinalTranscript = useCallback(async (text: string) => {
+    const clean = text.trim();
+    if (!clean || liveFinalizingRef.current) return;
+
+    liveFinalizingRef.current = true;
+    liveTurnCompletedRef.current = true;
+    liveEndSentRef.current = true;
+    liveWaitingForTurnCompleteRef.current = false;
+
+    console.log('[VITA LIVE STT] final:', clean);
+    setTranscript(`"${clean.toUpperCase()}"`);
+
+    const normalized = clean
+      .toLowerCase()
+      .replace(/[^a-z\s']/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!normalized) {
+      liveFinalizingRef.current = false;
+      endSessionRef.current?.();
+      return;
+    }
+
+    const timeSinceTts = performance.now() - lastTtsFinishedAtRef.current;
+
+    const echoPhrase =
+      /^(thank you|thanks|thankyou|you're welcome|you are welcome|welcome|okay|ok|thanks vita|thank you vita)$/.test(
+        normalized,
+      );
+
+    const likelyEcho =
+      echoPhrase ||
+      (timeSinceTts < 5000 &&
+        /^(good morning|good afternoon|good evening|good night|boss)$/.test(
+          normalized,
+        ));
+
+    if (likelyEcho || normalized.length < 2) {
+      console.log('[VITA LIVE STT] ignoring likely echo/noise:', clean);
+      liveFinalizingRef.current = false;
+      endSessionRef.current?.();
+      return;
+    }
+
+    if (
+      /^(?:vita\s+)?stop(?:\s+now)?$/.test(normalized) ||
+      /^stop(?:\s+the\s+)?session$/.test(normalized)
+    ) {
+      console.log('[VITA LIVE STT] STOP command detected');
+      liveFinalizingRef.current = false;
+      endSessionRef.current?.();
+      return;
+    }
+
+    await stopLiveTranscription(true, true);
+
+    if (!sessionActiveRef.current) {
+      liveFinalizingRef.current = false;
+      return;
+    }
+
+    await askVitaRef.current?.(clean);
+    liveFinalizingRef.current = false;
+  }, [stopLiveTranscription]);
+
+  const startLiveTranscription = useCallback(async () => {
+    if (!sessionActiveRef.current) return;
+    if (liveWsRef.current || liveStreamRef.current) return;
+
+    liveStoppingRef.current = false;
+    liveHasSpokenRef.current = false;
+    liveFinalTextRef.current = '';
+    liveFinalizingRef.current = false;
+    liveEndSentRef.current = false;
+    liveTurnCompletedRef.current = false;
+    liveWaitingForTurnCompleteRef.current = false;
+    liveLastFinalChunkRef.current = '';
+    liveStartedAtRef.current = performance.now();
+    liveLastVoiceAtRef.current = liveStartedAtRef.current;
+
+    try {
+      setStatusMsg('GETTING LIVE STT TOKEN...');
+
+      const tokenResponse = await fetch(
+        '/api/transcribe-live-token',
+        { cache: 'no-store' },
+      );
+
+      const tokenData = await tokenResponse.json();
+
+      if (!tokenResponse.ok) {
+        throw new Error(
+          tokenData?.error || 'Failed to obtain Gemini Live STT token.',
+        );
+      }
+
+      const wsUrl = tokenData?.wsUrl;
+
+      if (!wsUrl) {
+        throw new Error('Live STT token response has no wsUrl.');
+      }
+
+      console.log('[VITA LIVE STT] token acquired');
+
+      const ws = new WebSocket(wsUrl);
+      liveWsRef.current = ws;
+
+      // IMPORTANT: attach WebSocket handlers immediately.
+      // The socket can reach OPEN while getUserMedia()/AudioWorklet setup
+      // is awaiting. Registering onopen later can miss the OPEN event and
+      // leave VITA stuck on "GETTING LIVE STT TOKEN...".
+      ws.onopen = () => {
+        console.log('[VITA LIVE STT] websocket connected');
+
+        try {
+          ws.send(
+            JSON.stringify({
+              setup: {
+                model: 'models/gemini-3.5-transcribe-live',
+                generationConfig: {
+                  responseModalities: ['TEXT'],
+                },
+                inputAudioTranscription: {
+                  languageCodes: ['en-IN'],
+                  mode: 'VERBATIM',
+                  customVocabulary: [
+                    'VITA',
+                    'Vita',
+                    'Boss',
+                    'step count',
+                    'steps',
+                    'step tracking',
+                    'heart rate',
+                    'calories',
+                    'cadence',
+                    'distance',
+                    'workout',
+                    'fitness',
+                    'health',
+                    'exercise',
+                    'running',
+                    'walking',
+                    'activity',
+                    'camera',
+                    'phone',
+                    'Gemini',
+                    'ElevenLabs',
+                    'Transcribe',
+                  ],
+                },
+              },
+            }),
+          );
+
+          setStatusMsg('STARTING LIVE STT...');
+        } catch (error) {
+          console.error('[VITA LIVE STT] setup send failed', error);
+        }
+      };
+
+      ws.onmessage = async (event) => {
+        let message: any;
+
+        try {
+          message =
+            typeof event.data === 'string'
+              ? JSON.parse(event.data)
+              : JSON.parse(await new Response(event.data).text());
+        } catch {
+          return;
+        }
+
+        if (message?.setupComplete) {
+          liveSetupCompleteRef.current = true;
+          setMicOn(true);
+          setStatusMsg('LISTENING...');
+          setTranscript('— SPEAK TO VITA —');
+          console.log('[VITA LIVE STT] setup complete');
+          console.log('[VITA LIVE STT] microphone streaming');
+          return;
+        }
+
+        if (message?.error) {
+          console.error(
+            '[VITA LIVE STT] server error:',
+            message.error,
+          );
+          setErrorMsg(
+            message.error?.message || 'LIVE TRANSCRIPTION ERROR',
+          );
+          setStatusMsg('VITA ERROR');
+          await stopLiveTranscription(false);
+          return;
+        }
+
+        const content = message?.serverContent;
+
+        if (
+          content?.interimInputTranscription?.text &&
+          !liveTurnCompletedRef.current &&
+          !liveWaitingForTurnCompleteRef.current
+        ) {
+          setTranscript(
+            String(content.interimInputTranscription.text),
+          );
+          console.log(
+            '[VITA LIVE STT] interim:',
+            content.interimInputTranscription.text,
+          );
+        }
+
+        if (
+          content?.inputTranscription?.text &&
+          !liveTurnCompletedRef.current
+        ) {
+          const finalChunk = String(
+            content.inputTranscription.text,
+          ).trim();
+
+          if (
+            finalChunk &&
+            finalChunk !== liveLastFinalChunkRef.current
+          ) {
+            liveLastFinalChunkRef.current = finalChunk;
+
+            liveFinalTextRef.current =
+              `${liveFinalTextRef.current} ${finalChunk}`.trim();
+
+            setTranscript(
+              `"${liveFinalTextRef.current.toUpperCase()}"`,
+            );
+
+            console.log(
+              '[VITA LIVE STT] final chunk:',
+              finalChunk,
+            );
+
+            // Process the first authoritative final immediately. In this
+            // one-shot VITA flow, waiting for a separate turnComplete event
+            // can stall the Brain indefinitely.
+            await processLiveFinalTranscript(
+              liveFinalTextRef.current,
+            );
+          } else if (finalChunk) {
+            console.log(
+              '[VITA LIVE STT] duplicate final chunk ignored:',
+              finalChunk,
+            );
+          }
+        }
+
+        if (content?.turnComplete) {
+          console.log('[VITA LIVE STT] turn complete');
+        }
+      };
+
+      ws.onerror = (event) => {
+        console.error(
+          '[VITA LIVE STT] websocket error',
+          event,
+        );
+        setErrorMsg('LIVE STT CONNECTION ERROR');
+        setStatusMsg('VITA ERROR');
+      };
+
+      ws.onclose = (event) => {
+        console.log(
+          '[VITA LIVE STT] websocket closed',
+          event.code,
+          event.reason,
+        );
+
+        liveSetupCompleteRef.current = false;
+
+        if (
+          sessionActiveRef.current &&
+          !liveFinalizingRef.current
+        ) {
+          setStatusMsg('VITA READY');
+        }
+      };
+
+      const mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+
+      liveStreamRef.current = mediaStream;
+
+      const audioContext = new AudioContext();
+      liveAudioContextRef.current = audioContext;
+      await audioContext.resume();
+
+      await audioContext.audioWorklet.addModule('/vita-pcm-processor.js');
+
+      const source = audioContext.createMediaStreamSource(mediaStream);
+      const worklet = new AudioWorkletNode(
+        audioContext,
+        'vita-pcm-processor',
+        {
+          numberOfInputs: 1,
+          numberOfOutputs: 0,
+          channelCount: 1,
+        },
+      );
+
+      liveSourceRef.current = source;
+      liveWorkletRef.current = worklet;
+
+      worklet.port.onmessage = (event: MessageEvent) => {
+        if (
+          liveStoppingRef.current ||
+          !liveSetupCompleteRef.current ||
+          ws.readyState !== WebSocket.OPEN
+        ) {
+          return;
+        }
+
+        const payload = event.data as {
+          pcm16k: ArrayBuffer;
+          rms: number;
+        };
+
+        if (!payload?.pcm16k) return;
+
+        if (payload.rms > 0.02) {
+          liveHasSpokenRef.current = true;
+          liveLastVoiceAtRef.current = performance.now();
+
+          if (threeRef.current) {
+            threeRef.current.voiceAmp = Math.min(
+              0.9,
+              payload.rms * 5,
+            );
+          }
+        }
+
+        try {
+          ws.send(
+            JSON.stringify({
+              realtimeInput: {
+                audio: {
+                  data: pcm16ToBase64(
+                    new Int16Array(payload.pcm16k),
+                  ),
+                  mimeType: 'audio/pcm;rate=16000',
+                },
+              },
+            }),
+          );
+        } catch (error) {
+          console.error('[VITA LIVE STT] audio send failed', error);
+        }
+
+        if (
+          liveHasSpokenRef.current &&
+          !liveEndSentRef.current &&
+          performance.now() - liveLastVoiceAtRef.current >= 1200 &&
+          !liveFinalizingRef.current
+        ) {
+          liveEndSentRef.current = true;
+          liveWaitingForTurnCompleteRef.current = true;
+
+          console.log('[VITA LIVE STT] local silence detected');
+
+          try {
+            ws.send(
+              JSON.stringify({
+                realtimeInput: {
+                  audioStreamEnd: true,
+                },
+              }),
+            );
+            console.log('[VITA LIVE STT] audioStreamEnd sent');
+          } catch (error) {
+            console.error(
+              '[VITA LIVE STT] audioStreamEnd send failed',
+              error,
+            );
+          }
+
+          // Stop microphone capture now, but KEEP the WebSocket open.
+          // Gemini still needs to send the final transcription + turnComplete.
+          liveStoppingRef.current = true;
+          liveWorkletRef.current?.disconnect();
+          liveSourceRef.current?.disconnect();
+          liveStreamRef.current?.getTracks().forEach((track) => track.stop());
+          liveStreamRef.current = null;
+          liveWorkletRef.current = null;
+          liveSourceRef.current = null;
+          setMicOn(false);
+          return;
+        }
+
+        // Safety limit only. A normal utterance should end by silence first.
+        // Keep this comfortably above the previous 7-second limit.
+        if (
+          !liveEndSentRef.current &&
+          performance.now() - liveStartedAtRef.current >= 20000 &&
+          !liveFinalizingRef.current
+        ) {
+          liveEndSentRef.current = true;
+          liveWaitingForTurnCompleteRef.current = true;
+
+          console.log('[VITA LIVE STT] safety max turn duration reached');
+
+          try {
+            ws.send(
+              JSON.stringify({
+                realtimeInput: {
+                  audioStreamEnd: true,
+                },
+              }),
+            );
+            console.log('[VITA LIVE STT] audioStreamEnd sent');
+          } catch (error) {
+            console.error(
+              '[VITA LIVE STT] audioStreamEnd send failed',
+              error,
+            );
+          }
+
+          liveStoppingRef.current = true;
+          liveWorkletRef.current?.disconnect();
+          liveSourceRef.current?.disconnect();
+          liveStreamRef.current?.getTracks().forEach((track) => track.stop());
+          liveStreamRef.current = null;
+          liveWorkletRef.current = null;
+          liveSourceRef.current = null;
+          setMicOn(false);
+          return;
+        }
+      };
+
+      source.connect(worklet);
+
+    } catch (error) {
+      console.error('[VITA LIVE STT] start failed', error);
+      setErrorMsg(
+        error instanceof Error
+          ? error.message
+          : 'LIVE STT UNAVAILABLE',
+      );
+
+      await stopLiveTranscription(false);
+      endSessionRef.current?.();
+    }
+  }, [processLiveFinalTranscript, stopLiveTranscription]);
+
   const speakVita = useCallback(async (text: string) => {
     const cleanText = text.replace(/\s+/g, ' ').trim();
     if (!cleanText) return;
 
+    if (ttsInFlightRef.current) {
+      console.warn('[VITA TTS] Duplicate speak request ignored.');
+      return;
+    }
+
+    ttsInFlightRef.current = true;
+
     const requestId = ++ttsRequestIdRef.current;
 
-    // Absolute single-audio ownership: stop any previous audio and all legacy
-    // browser speech before VITA starts speaking.
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
       window.speechSynthesis.resume();
@@ -395,7 +972,9 @@ export default function VitaOrb() {
     setStatusMsg('VITA SPEAKING...');
 
     const started = performance.now();
-    console.log('[VITA TTS] ElevenLabs streaming request started');
+    console.log(
+      `[VITA TTS] /api/speak request started (request=${requestId})`,
+    );
 
     try {
       const audioUrl =
@@ -436,15 +1015,14 @@ export default function VitaOrb() {
           settled = true;
 
           ttsActiveRef.current = false;
+          ttsInFlightRef.current = false;
           lastTtsFinishedAtRef.current = performance.now();
 
-          // Keep the microphone closed briefly after TTS to prevent the
-          // response from being re-recorded as a user command.
           ttsCooldownUntilRef.current = performance.now() + 1500;
           setStatusMsg('VITA READY');
 
           console.log(
-            `[VITA TTS] ElevenLabs finished in ${Math.round(
+            `[VITA TTS] /api/speak finished in ${Math.round(
               performance.now() - started,
             )}ms`,
           );
@@ -474,6 +1052,7 @@ export default function VitaOrb() {
           if (settled) return;
           settled = true;
           ttsActiveRef.current = false;
+          ttsInFlightRef.current = false;
           cleanup();
           reject(new Error('VITA streaming audio playback failed.'));
         };
@@ -482,6 +1061,7 @@ export default function VitaOrb() {
           if (settled) return;
           settled = true;
           ttsActiveRef.current = false;
+          ttsInFlightRef.current = false;
           cleanup();
           reject(
             error instanceof Error
@@ -492,13 +1072,12 @@ export default function VitaOrb() {
       });
     } catch (error) {
       ttsActiveRef.current = false;
+      ttsInFlightRef.current = false;
       ttsCooldownUntilRef.current = performance.now() + 700;
       setStatusMsg('VITA ERROR');
       setErrorMsg('NEURAL TTS UNAVAILABLE');
 
-      // Never fall back to SpeechSynthesis. That was the source of the
-      // unwanted Heera/Google second voice.
-      console.error('[VITA TTS] ElevenLabs streaming failed:', error);
+      console.error('[VITA TTS] /api/speak failed:', error);
     }
   }, []);
 
@@ -535,7 +1114,9 @@ export default function VitaOrb() {
       const data = await res.json();
 
       console.log(
-        `[VITA] /api/agent round trip: ${Math.round(performance.now() - started)}ms`,
+        `[VITA] /api/agent round trip: ${Math.round(
+          performance.now() - started,
+        )}ms`,
       );
 
       if (!res.ok) throw new Error(data.error || 'VITA agent failed');
@@ -546,9 +1127,6 @@ export default function VitaOrb() {
       setTranscript(`"${answer.toUpperCase()}"`);
       await speakVita(answer);
 
-      // ONE USER COMMAND PER SESSION.
-      // Do not reopen the microphone after the answer; this was the source
-      // of the repeated self-listening / "Thank you" loop.
       if (sessionActiveRef.current) {
         endSessionRef.current?.();
       }
@@ -561,9 +1139,6 @@ export default function VitaOrb() {
       setStatusMsg('AI OFFLINE');
       setErrorMsg('GEMINI TEMPORARILY UNAVAILABLE');
 
-      // Never restart the microphone automatically after a brain failure.
-      // Doing so creates a transcription storm and repeatedly sends silence/
-      // echo phrases such as "Thank you" back into Whisper.
       window.dispatchEvent(new Event('vita:agent-failed'));
       endSessionRef.current?.();
 
@@ -582,357 +1157,12 @@ export default function VitaOrb() {
 
   askVitaRef.current = askVita;
 
-  // ── PHASE 1: Voice ──────────────────────────────────────────────
-  const startMic = useCallback(async () => {
-    if (!sessionActiveRef.current) return;
-
-    const remaining = ttsCooldownUntilRef.current - performance.now();
-
-    if (ttsActiveRef.current || remaining > 0) {
-      window.setTimeout(() => {
-        if (sessionActiveRef.current) void startMicRef.current?.();
-      }, Math.max(250, remaining));
-      return;
-    }
-
-    if (audioRef.current?.recorder) return;
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 1,
-        },
-      });
-
-      if (!sessionActiveRef.current) {
-        stream.getTracks().forEach((track) => track.stop());
-        return;
-      }
-
-      const ctx = new AudioContext();
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 512;
-      analyser.smoothingTimeConstant = 0.75;
-
-      const data = new Uint8Array(analyser.fftSize);
-      ctx.createMediaStreamSource(stream).connect(analyser);
-
-      let rafId = 0;
-
-      const tick = () => {
-        if (!audioRef.current) return;
-        rafId = requestAnimationFrame(tick);
-        analyser.getByteFrequencyData(data);
-
-        if (threeRef.current) {
-          threeRef.current.voiceAmp =
-            data.reduce((a, b) => a + b, 0) / data.length / 128;
-        }
-      };
-
-      tick();
-
-      const mimeType =
-        MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-          ? 'audio/webm;codecs=opus'
-          : MediaRecorder.isTypeSupported('audio/webm')
-            ? 'audio/webm'
-            : '';
-
-      const recorder = mimeType
-        ? new MediaRecorder(stream, { mimeType })
-        : new MediaRecorder(stream);
-
-      const chunks: Blob[] = [];
-      let stopping = false;
-      let hasSpoken = false;
-      const startedAt = performance.now();
-      let lastVoiceAt = startedAt;
-
-      recorder.ondataavailable = (event) => {
-        if (event.data?.size) chunks.push(event.data);
-      };
-
-      recorder.onerror = (event) => {
-        console.error('[VITA RECORDER ERROR]', event);
-      };
-
-      const finishRecording = (reason: string) => {
-        if (stopping || recorder.state === 'inactive') return;
-
-        stopping = true;
-        console.log('[VITA] Stopping recorder:', reason);
-
-        try {
-          recorder.requestData();
-        } catch { }
-
-        setStatusMsg('TRANSCRIBING...');
-
-        window.setTimeout(() => {
-          try {
-            if (recorder.state !== 'inactive') recorder.stop();
-          } catch (error) {
-            console.error('[VITA STOP RECORDER]', error);
-          }
-        }, 40);
-      };
-
-      recorder.onstop = async () => {
-        try {
-          await new Promise<void>((resolve) => window.setTimeout(resolve, 80));
-
-          if (!sessionActiveRef.current) return;
-
-          const blob = new Blob(chunks, {
-            type: recorder.mimeType || 'audio/webm',
-          });
-
-          if (!hasSpoken || blob.size < 6000) {
-            console.log('[VITA] Ignoring empty/noise recording.');
-            setTranscript('— DID NOT CATCH THAT —');
-
-            // One-shot session: do not re-open the microphone after silence.
-            endSessionRef.current?.();
-            return;
-          }
-
-          const form = new FormData();
-          form.append('audio', blob, 'vita-voice.webm');
-
-          const started = performance.now();
-
-          const response = await fetch('/api/transcribe', {
-            method: 'POST',
-            body: form,
-          });
-
-          const data = await response.json();
-
-          console.log(
-            `[VITA] Gemini Transcribe round trip: ${Math.round(
-              performance.now() - started,
-            )}ms`,
-          );
-
-          if (!response.ok) {
-            throw new Error(data.error || 'Transcription failed');
-          }
-
-          if (!sessionActiveRef.current) return;
-
-          const text = String(data.text || '').trim();
-
-          const normalized = text
-            .toLowerCase()
-            .replace(/[^a-z\s']/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-
-          if (!normalized) {
-            console.log('[VITA] Empty transcript — ending one-shot session.');
-            endSessionRef.current?.();
-            return;
-          }
-
-          console.log('[VITA] Gemini transcript:', text);
-
-          const timeSinceTts =
-            performance.now() - lastTtsFinishedAtRef.current;
-
-          const echoPhrase =
-            /^(thank you|thanks|thankyou|you're welcome|you are welcome|welcome|okay|ok|thanks vita|thank you vita)$/.test(
-              normalized,
-            );
-
-          const likelyEcho =
-            echoPhrase ||
-            (timeSinceTts < 5000 &&
-              /^(good morning|good afternoon|good evening|good night|boss)$/.test(
-                normalized,
-              ));
-
-          const promptLeak =
-            normalized.includes('return only the spoken transcript') ||
-            normalized.includes("transcribe only the user's spoken words") ||
-            normalized.includes('transcribe only the spoken words');
-
-          if (
-            likelyEcho ||
-            promptLeak ||
-            normalized.length < 2 ||
-            /^[.]+$/.test(normalized)
-          ) {
-            console.log('[VITA] Ignoring likely echo/noise:', text);
-
-            // Critical: END, do not restart the microphone.
-            endSessionRef.current?.();
-            return;
-          }
-
-          if (
-            /^(?:vita\s+)?stop(?:\s+now)?$/.test(normalized) ||
-            /^stop(?:\s+the\s+)?session$/.test(normalized)
-          ) {
-            console.log('[VITA] STOP command detected — no agent call.');
-            endSessionRef.current?.();
-            return;
-          }
-
-          setTranscript(`"${text.toUpperCase()}"`);
-          await askVitaRef.current?.(text);
-
-        } catch (error) {
-          console.error('[VITA TRANSCRIPTION]', error);
-
-          if (sessionActiveRef.current) {
-            setStatusMsg('VITA ERROR');
-            setErrorMsg('TRANSCRIPTION FAILED');
-
-            // Never start another recorder after a failed STT request.
-            endSessionRef.current?.();
-          }
-        } finally {
-          if (audioRef.current?.silenceRaf) {
-            cancelAnimationFrame(audioRef.current.silenceRaf);
-          }
-
-          stream.getTracks().forEach((track) => track.stop());
-
-          await ctx.close().catch(() => undefined);
-
-          audioRef.current = null;
-          setMicOn(false);
-
-          if (threeRef.current) {
-            threeRef.current.voiceAmp = 0;
-          }
-        }
-      };
-
-      const detectSilence = () => {
-        if (
-          !audioRef.current ||
-          audioRef.current.recorder !== recorder ||
-          recorder.state !== 'recording'
-        ) {
-          return;
-        }
-
-        const now = performance.now();
-
-        analyser.getByteTimeDomainData(data);
-
-        let sumSquares = 0;
-
-        for (let i = 0; i < data.length; i += 1) {
-          const x = (data[i] - 128) / 128;
-          sumSquares += x * x;
-        }
-
-        const rms = Math.sqrt(sumSquares / data.length);
-
-        if (rms > 0.045) {
-          hasSpoken = true;
-          lastVoiceAt = now;
-        }
-
-        if (
-          hasSpoken &&
-          now - startedAt >= 500 &&
-          now - lastVoiceAt >= 900
-        ) {
-          finishRecording('silence');
-          return;
-        }
-
-        if (now - startedAt >= 7000) {
-          finishRecording('max-duration');
-          return;
-        }
-
-        audioRef.current.silenceRaf =
-          requestAnimationFrame(detectSilence);
-      };
-
-      audioRef.current = {
-        ctx,
-        analyser,
-        data,
-        rafId,
-        stream,
-        recorder,
-        chunks,
-        silenceRaf: 0,
-      };
-
-      recorder.start(250);
-      audioRef.current.silenceRaf =
-        requestAnimationFrame(detectSilence);
-
-      setMicOn(true);
-      setMicSim(false);
-      setStatusMsg('LISTENING...');
-      setTranscript('— SPEAK TO VITA —');
-      setErrorMsg('');
-
-    } catch (error) {
-      console.error('[VITA MICROPHONE]', error);
-      setMicOn(false);
-      setMicSim(false);
-      setErrorMsg('MICROPHONE UNAVAILABLE');
-      setStatusMsg('VITA READY');
-    }
-  }, []);
-
-  startMicRef.current = startMic;
+  // Start Live STT after the greeting.
+  startMicRef.current = startLiveTranscription;
 
   const stopMic = useCallback(() => {
-    const audio = audioRef.current;
-
-    if (!audio) {
-      setMicOn(false);
-      return;
-    }
-
-    if (audio.silenceRaf) {
-      cancelAnimationFrame(audio.silenceRaf);
-    }
-
-    if (
-      audio.recorder &&
-      audio.recorder.state !== 'inactive'
-    ) {
-      setStatusMsg('TRANSCRIBING...');
-
-      try {
-        audio.recorder.requestData();
-      } catch { }
-
-      window.setTimeout(() => {
-        try {
-          if (audio.recorder.state !== 'inactive') {
-            audio.recorder.stop();
-          }
-        } catch (error) {
-          console.error('[VITA STOP MIC]', error);
-        }
-      }, 40);
-
-      return;
-    }
-
-    audio.stream?.getTracks().forEach((track: MediaStreamTrack) => {
-      track.stop();
-    });
-
-    audio.ctx?.close().catch(() => undefined);
-    audioRef.current = null;
-    setMicOn(false);
-  }, []);
+    void stopLiveTranscription(true);
+  }, [stopLiveTranscription]);
 
   const endSession = useCallback(() => {
     if (!sessionActiveRef.current) return;
@@ -940,16 +1170,17 @@ export default function VitaOrb() {
     sessionActiveRef.current = false;
     setSessionActive(false);
     ttsActiveRef.current = false;
+    ttsInFlightRef.current = false;
     ttsCooldownUntilRef.current = 0;
 
-    stopMic();
+    void stopLiveTranscription(false);
 
     setStatusMsg('VITA READY');
     setTranscript('— SESSION ENDED —');
     console.log('[VITA SESSION] OFF');
 
     window.dispatchEvent(new Event('vita:session-ended'));
-  }, [stopMic]);
+  }, [stopLiveTranscription]);
 
   endSessionRef.current = endSession;
 
@@ -971,7 +1202,6 @@ export default function VitaOrb() {
 
     if (!sessionActiveRef.current) return;
 
-    // After the greeting, listen for exactly one user command.
     void startMicRef.current?.();
   }, [getGreeting, speakVita]);
 
@@ -1056,7 +1286,7 @@ export default function VitaOrb() {
         if (p !== 'granted') throw new Error('denied');
       }
       if (!('DeviceMotionEvent' in window)) throw new Error('unsupported');
-      const { StepDetector } = await import('@/lib/stepDetector');
+      const { StepDetector } = await import('../lib/stepDetector');
       const det = new StepDetector(); stepDetRef.current = det; det.reset();
       det.onStep = (data) => {
         setStepData(data);
