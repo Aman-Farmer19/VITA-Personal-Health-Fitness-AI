@@ -284,7 +284,7 @@ async function createInteraction(
         ...payload,
       }),
       cache: "no-store",
-      signal: AbortSignal.timeout(12000),
+      signal: AbortSignal.timeout(25000),
     },
   );
 }
@@ -507,7 +507,7 @@ export async function POST(req: NextRequest) {
         error:
           error instanceof Error
             ? error.name === "TimeoutError"
-              ? "Gemini timed out after 12 seconds."
+              ? "Gemini timed out after 25 seconds."
               : error.message
             : "Gemini request failed.",
       },

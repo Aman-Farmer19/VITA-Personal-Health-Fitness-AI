@@ -171,7 +171,7 @@ async function geminiTts(text: string) {
   }
 }
 
-async function elevenLabsFallback(
+async function elevenLabsPrimary(
   text: string,
   cause: unknown = null,
 ) {
@@ -181,8 +181,10 @@ async function elevenLabsFallback(
     process.env.VITA_TTS_MODEL || "eleven_flash_v2_5";
 
   console.warn(
-    "[VITA TTS] Gemini unavailable; using ElevenLabs fallback.",
-    cause,
+    cause
+      ? "[VITA TTS] ElevenLabs primary retry/attempt after upstream issue."
+      : "[VITA TTS] ElevenLabs primary request.",
+    ...(cause ? [cause] : []),
   );
 
   if (!apiKey || !voiceId) {
@@ -277,7 +279,7 @@ async function speakWithPolicy(text: string) {
   try {
     console.log("[VITA TTS] primary=ElevenLabs");
 
-    const eleven = await elevenLabsFallback(text, null);
+    const eleven = await elevenLabsPrimary(text, null);
 
     if (eleven.ok) {
       return eleven;
@@ -404,3 +406,50 @@ export async function POST(req: NextRequest) {
     );
   }
 }
+
+async function elevenLabsFallback(
+  text: string,
+  error: unknown,
+) {
+  console.warn(
+    "[VITA TTS] Gemini TTS failed; using ElevenLabs fallback.",
+    error,
+  );
+
+  try {
+    const response = await elevenLabsPrimary(text, error);
+
+    if (response instanceof Response && response.ok) {
+      return response;
+    }
+
+    const body = response instanceof Response ? await response.text() : "";
+
+    return NextResponse.json(
+      {
+        error:
+          body ||
+          (error instanceof Error
+            ? error.message
+            : "ElevenLabs fallback failed after Gemini TTS failure."),
+      },
+      { status: response instanceof Response ? response.status || 502 : 502 },
+    );
+  } catch (fallbackError) {
+    console.error(
+      "[VITA TTS] ElevenLabs fallback failed:",
+      fallbackError,
+    );
+
+    return NextResponse.json(
+      {
+        error:
+          fallbackError instanceof Error
+            ? fallbackError.message
+            : "ElevenLabs fallback failed after Gemini TTS failure.",
+      },
+      { status: 502 },
+    );
+  }
+}
+
