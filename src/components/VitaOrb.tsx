@@ -442,7 +442,11 @@ export default function VitaOrb() {
 
     const ws = liveWsRef.current;
 
-    if (sendStreamEnd && ws?.readyState === WebSocket.OPEN) {
+    if (
+      sendStreamEnd &&
+      !liveEndSentRef.current &&
+      ws?.readyState === WebSocket.OPEN
+    ) {
       liveEndSentRef.current = true;
       try {
         ws.send(

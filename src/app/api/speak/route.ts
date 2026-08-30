@@ -4,367 +4,274 @@ import { GoogleGenAI } from "@google/genai";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview";
-const GEMINI_TTS_VOICE =
-  process.env.GEMINI_TTS_VOICE || "Aoede";
+const ELEVEN_MODEL = process.env.VITA_TTS_MODEL || "eleven_flash_v2_5";
+const ELEVEN_OUTPUT_FORMAT = "mp3_22050_32";
+const ELEVEN_TIMEOUT_MS = 8_000;
 
-const FALLBACK_ENGINE =
-  (process.env.VITA_TTS_FALLBACK || "elevenlabs").toLowerCase();
+const GEMINI_MODEL = "gemini-3.1-flash-tts-preview";
+const GEMINI_VOICE = process.env.GEMINI_TTS_VOICE || "Aoede";
+const GEMINI_COOLDOWN_MS = 60 * 60 * 1000;
+
+let geminiDisabledUntil = 0;
+let geminiFallbackInFlight: Promise<Response> | null = null;
+
+function errText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isQuotaError(error: unknown): boolean {
+  const message = errText(error);
+  return (
+    /\b429\b/.test(message) ||
+    /RESOURCE_EXHAUSTED/i.test(message) ||
+    /quota/i.test(message) ||
+    /rate.?limit/i.test(message)
+  );
+}
+
+function geminiCoolingDown(): boolean {
+  return Date.now() < geminiDisabledUntil;
+}
+
+function disableGemini(reason: string) {
+  geminiDisabledUntil = Date.now() + GEMINI_COOLDOWN_MS;
+  console.warn(`[VITA TTS] Gemini FALLBACK disabled for 60 minutes: ${reason}`);
+}
 
 function pcmToWav(
   pcm: Buffer,
   sampleRate = 24000,
-  numChannels = 1,
+  channels = 1,
   bitsPerSample = 16,
-) {
-  const byteRate =
-    sampleRate * numChannels * (bitsPerSample / 8);
-  const blockAlign =
-    numChannels * (bitsPerSample / 8);
-
+): Buffer {
+  const blockAlign = (channels * bitsPerSample) / 8;
+  const byteRate = sampleRate * blockAlign;
   const header = Buffer.alloc(44);
 
   header.write("RIFF", 0);
   header.writeUInt32LE(36 + pcm.length, 4);
   header.write("WAVE", 8);
-
   header.write("fmt ", 12);
   header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20); // PCM
-  header.writeUInt16LE(numChannels, 22);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(channels, 22);
   header.writeUInt32LE(sampleRate, 24);
   header.writeUInt32LE(byteRate, 28);
   header.writeUInt16LE(blockAlign, 32);
   header.writeUInt16LE(bitsPerSample, 34);
-
   header.write("data", 36);
   header.writeUInt32LE(pcm.length, 40);
 
   return Buffer.concat([header, pcm]);
 }
 
-async function geminiTts(text: string) {
-  const apiKey = process.env.GEMINI_API_KEY;
+async function elevenLabsPrimary(text: string): Promise<Response> {
+  const apiKey = process.env.ELEVENLABS_API_KEY;
+  const voiceId = process.env.VITA_TTS_VOICE_ID;
 
   if (!apiKey) {
     return NextResponse.json(
-      { error: "GEMINI_API_KEY is missing from .env.local." },
+      { error: "ELEVENLABS_API_KEY is missing from .env.local." },
       { status: 500 },
     );
   }
 
-  const started = performance.now();
-
-  try {
-    const ai = new GoogleGenAI({ apiKey });
-
-    /*
-     * This intentionally follows Google's current JavaScript TTS sample:
-     * models.generateContentStream(...)
-     * responseModalities: ['AUDIO']
-     * prebuiltVoiceConfig.voiceName
-     */
-    const responseStream = await ai.models.generateContentStream({
-      model: GEMINI_TTS_MODEL,
-      contents: [
-        {
-          role: "user",
-          parts: [
-            {
-              text: [
-                "Read the following text as VITA, a personal health and fitness assistant.",
-                "Style: warm, natural, confident, calm, conversational.",
-                "Accent: Indian English.",
-                "Pace: moderate and natural, with clear pauses.",
-                "Do not add or remove words.",
-                "",
-                `Text to speak: ${text}`,
-              ].join("\n"),
-            },
-          ],
-        },
-      ],
-      config: {
-        responseModalities: ["AUDIO"],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: {
-              voiceName: GEMINI_TTS_VOICE,
-            },
-          },
-        },
-      },
-    });
-
-    const chunks: Buffer[] = [];
-    let chunkCount = 0;
-    let mimeType = "audio/pcm";
-
-    for await (const chunk of responseStream) {
-      const inlineData =
-        chunk.candidates?.[0]?.content?.parts?.[0]?.inlineData;
-
-      if (!inlineData?.data) continue;
-
-      const audioChunk = Buffer.from(
-        inlineData.data,
-        "base64",
-      );
-
-      if (audioChunk.length === 0) continue;
-
-      chunks.push(audioChunk);
-      chunkCount += 1;
-
-      if (inlineData.mimeType) {
-        mimeType = inlineData.mimeType;
-      }
-    }
-
-    const pcm = Buffer.concat(chunks);
-
-    console.log(
-      `[VITA TTS] Gemini SDK chunks=${chunkCount} bytes=${pcm.length} mime=${mimeType} in ${Math.round(
-        performance.now() - started,
-      )}ms`,
-    );
-
-    if (!pcm.length) {
-      throw new Error(
-        "Gemini TTS stream completed without audio data.",
-      );
-    }
-
-    // Gemini's documented stream returns raw PCM:
-    // 24 kHz, mono, 16-bit. Wrap it in WAV for browser Audio().
-    const wav = pcmToWav(pcm, 24000, 1, 16);
-
-    return new Response(wav, {
-      status: 200,
-      headers: {
-        "Content-Type": "audio/wav",
-        "Content-Length": String(wav.length),
-        "Cache-Control": "no-store, no-cache, must-revalidate",
-        "X-Vita-TTS-Provider": GEMINI_TTS_MODEL,
-        "X-Vita-TTS-Voice": GEMINI_TTS_VOICE,
-        "X-Vita-TTS-Latency-Ms": String(
-          Math.round(performance.now() - started),
-        ),
-      },
-    });
-  } catch (error) {
-    console.error("[VITA TTS] Gemini SDK failed:", error);
-
-    if (FALLBACK_ENGINE === "elevenlabs") {
-      return elevenLabsFallback(text, error);
-    }
-
+  if (!voiceId) {
     return NextResponse.json(
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Gemini TTS failed.",
-      },
-      { status: 502 },
-    );
-  }
-}
-
-async function elevenLabsPrimary(
-  text: string,
-  cause: unknown = null,
-) {
-  const apiKey = process.env.ELEVENLABS_API_KEY;
-  const voiceId = process.env.VITA_TTS_VOICE_ID;
-  const modelId =
-    process.env.VITA_TTS_MODEL || "eleven_flash_v2_5";
-
-  console.warn(
-    cause
-      ? "[VITA TTS] ElevenLabs primary retry/attempt after upstream issue."
-      : "[VITA TTS] ElevenLabs primary request.",
-    ...(cause ? [cause] : []),
-  );
-
-  if (!apiKey || !voiceId) {
-    return NextResponse.json(
-      {
-        error:
-          "Gemini TTS failed and ElevenLabs fallback is not configured.",
-      },
-      { status: 502 },
+      { error: "VITA_TTS_VOICE_ID is missing from .env.local." },
+      { status: 500 },
     );
   }
 
   const url =
     `https://api.elevenlabs.io/v1/text-to-speech/` +
     `${encodeURIComponent(voiceId)}/stream` +
-    `?output_format=mp3_22050_32`;
+    `?output_format=${encodeURIComponent(ELEVEN_OUTPUT_FORMAT)}`;
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "xi-api-key": apiKey,
-      "Content-Type": "application/json",
-      Accept: "audio/mpeg",
-    },
-    body: JSON.stringify({
-      text,
-      model_id: modelId,
-      voice_settings: {
-        stability: 0.45,
-        similarity_boost: 0.8,
-        style: 0.15,
-        use_speaker_boost: true,
+  console.log(`[VITA TTS] ElevenLabs PRIMARY start model=${ELEVEN_MODEL}`);
+  const started = performance.now();
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ELEVEN_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "xi-api-key": apiKey,
+        "Content-Type": "application/json",
+        Accept: "audio/mpeg",
       },
-    }),
-    cache: "no-store",
-  });
+      body: JSON.stringify({
+        text,
+        model_id: ELEVEN_MODEL,
+        voice_settings: {
+          stability: 0.45,
+          similarity_boost: 0.8,
+          style: 0.15,
+          use_speaker_boost: true,
+        },
+      }),
+      cache: "no-store",
+      signal: controller.signal,
+    });
 
-  if (!response.ok || !response.body) {
-    const errorText = await response.text();
+    const elapsed = Math.round(performance.now() - started);
+    console.log(
+      `[VITA TTS] ElevenLabs PRIMARY status=${response.status} in ${elapsed}ms`,
+    );
 
-    return new NextResponse(
-      errorText || "ElevenLabs fallback failed.",
+    if (!response.ok) {
+      const detail = await response.text();
+      console.error(
+        `[VITA TTS] ElevenLabs PRIMARY error ${response.status}: ${detail}`,
+      );
+      throw new Error(
+        `ElevenLabs returned HTTP ${response.status}: ${detail}`,
+      );
+    }
+
+    if (!response.body) {
+      throw new Error("ElevenLabs returned HTTP 200 without an audio stream.");
+    }
+
+    return new Response(response.body, {
+      status: 200,
+      headers: {
+        "Content-Type":
+          response.headers.get("content-type") || "audio/mpeg",
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "X-Vita-TTS-Provider": "elevenlabs",
+        "X-Vita-TTS-Model": ELEVEN_MODEL,
+      },
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(
+        `ElevenLabs PRIMARY timed out after ${ELEVEN_TIMEOUT_MS}ms.`,
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function geminiFallback(text: string): Promise<Response> {
+  const apiKey = process.env.GEMINI_API_KEY;
+
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY is missing from .env.local.");
+  }
+
+  console.log(
+    `[VITA TTS] Gemini FALLBACK start model=${GEMINI_MODEL} voice=${GEMINI_VOICE}`,
+  );
+  const started = performance.now();
+
+  const ai = new GoogleGenAI({ apiKey });
+
+  const stream = await ai.models.generateContentStream({
+    model: GEMINI_MODEL,
+    contents: [
       {
-        status: response.status || 502,
-        headers: {
-          "Content-Type":
-            response.headers.get("content-type") ||
-            "text/plain",
+        role: "user",
+        parts: [
+          {
+            text: [
+              "Read the following text as VITA, a personal health and fitness assistant.",
+              "Style: warm, natural, confident, calm, conversational.",
+              "Accent: Indian English.",
+              "Pace: moderate and natural, with clear pauses.",
+              "Do not add or remove words.",
+              "",
+              `Text to speak: ${text}`,
+            ].join("\n"),
+          },
+        ],
+      },
+    ],
+    config: {
+      responseModalities: ["AUDIO"],
+      speechConfig: {
+        voiceConfig: {
+          prebuiltVoiceConfig: {
+            voiceName: GEMINI_VOICE,
+          },
         },
       },
-    );
+    },
+  });
+
+  const chunks: Buffer[] = [];
+  let chunkCount = 0;
+
+  for await (const chunk of stream) {
+    const inlineData =
+      chunk.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+    if (!inlineData?.data) continue;
+
+    const audio = Buffer.from(inlineData.data, "base64");
+    if (!audio.length) continue;
+
+    chunks.push(audio);
+    chunkCount += 1;
   }
 
-  return new Response(response.body, {
+  const pcm = Buffer.concat(chunks);
+
+  console.log(
+    `[VITA TTS] Gemini FALLBACK chunks=${chunkCount} bytes=${pcm.length} in ${Math.round(
+      performance.now() - started,
+    )}ms`,
+  );
+
+  if (!pcm.length) {
+    throw new Error("Gemini FALLBACK completed without audio data.");
+  }
+
+  const wav = pcmToWav(pcm);
+  const wavBytes = new Uint8Array(wav);
+
+  return new Response(wavBytes, {
     status: 200,
     headers: {
-      "Content-Type":
-        response.headers.get("content-type") ||
-        "audio/mpeg",
+      "Content-Type": "audio/wav",
+      "Content-Length": String(wav.length),
       "Cache-Control": "no-store, no-cache, must-revalidate",
-      "X-Vita-TTS-Provider": "elevenlabs-primary",
+      "X-Vita-TTS-Provider": "gemini",
+      "X-Vita-TTS-Model": GEMINI_MODEL,
+      "X-Vita-TTS-Voice": GEMINI_VOICE,
     },
   });
 }
 
-let geminiDisabledUntil = 0;
-let geminiProbeInFlight: Promise<Response> | null = null;
+async function getGeminiFallback(text: string): Promise<Response> {
+  if (geminiFallbackInFlight) return geminiFallbackInFlight;
 
-const GEMINI_COOLDOWN_MS = 60 * 60 * 1000;
-
-function isGeminiTtsCoolingDown() {
-  return Date.now() < geminiDisabledUntil;
-}
-
-function disableGeminiTts(reason: string) {
-  geminiDisabledUntil = Date.now() + GEMINI_COOLDOWN_MS;
-  console.warn(
-    `[VITA TTS] Gemini TTS disabled for ${Math.round(
-      GEMINI_COOLDOWN_MS / 60000,
-    )} minutes: ${reason}`,
-  );
-}
-
-async function speakWithPolicy(text: string) {
-  /*
-   * Production policy:
-   *   1. ElevenLabs is the primary voice.
-   *   2. Gemini 3.1 Flash TTS is a fallback.
-   *   3. A Gemini 429 triggers a cooldown so we don't burn requests
-   *      repeatedly while the project is quota-limited.
-   */
-  try {
-    console.log("[VITA TTS] primary=ElevenLabs");
-
-    const eleven = await elevenLabsPrimary(text, null);
-
-    if (eleven.ok) {
-      return eleven;
-    }
-
-    console.warn(
-      `[VITA TTS] ElevenLabs primary returned HTTP ${eleven.status}; trying Gemini fallback.`,
-    );
-  } catch (error) {
-    console.warn(
-      "[VITA TTS] ElevenLabs primary failed; trying Gemini fallback.",
-      error,
+  if (geminiCoolingDown()) {
+    throw new Error(
+      "Gemini TTS FALLBACK is in 60-minute quota cooldown.",
     );
   }
 
-  if (isGeminiTtsCoolingDown()) {
-    console.log(
-      "[VITA TTS] Gemini fallback is cooling down; returning ElevenLabs error.",
-    );
-
-    return NextResponse.json(
-      {
-        error:
-          "Primary ElevenLabs TTS failed and Gemini TTS is temporarily disabled because of quota/rate limiting.",
-      },
-      { status: 503 },
-    );
-  }
-
-  return geminiWithQuotaHandling(text);
-}
-
-async function geminiWithQuotaHandling(text: string) {
-  // De-duplicate simultaneous Gemini fallback attempts.
-  if (geminiProbeInFlight) {
-    return geminiProbeInFlight;
-  }
-
-  geminiProbeInFlight = (async () => {
+  geminiFallbackInFlight = (async () => {
     try {
-      console.log(
-        `[VITA TTS] fallback=Gemini model=${GEMINI_TTS_MODEL} voice=${GEMINI_TTS_VOICE}`,
-      );
-
-      return await geminiTts(text);
+      return await geminiFallback(text);
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : String(error);
-
-      // The SDK currently throws ApiError with status=429 for free-tier
-      // request exhaustion. Treat the error as quota exhaustion and enter
-      // cooldown rather than retrying over and over.
-      const looksLikeQuota =
-        /\b429\b/.test(message) ||
-        /RESOURCE_EXHAUSTED/i.test(message) ||
-        /quota/i.test(message) ||
-        /rate.?limit/i.test(message);
-
-      if (looksLikeQuota) {
-        disableGeminiTts("quota/rate limit detected");
+      if (isQuotaError(error)) {
+        disableGemini(errText(error));
       }
-
       throw error;
     } finally {
-      geminiProbeInFlight = null;
+      geminiFallbackInFlight = null;
     }
-  })().catch(async (error) => {
-    console.error("[VITA TTS] Gemini fallback failed:", error);
+  })();
 
-    // Keep the response contract predictable.
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Gemini fallback TTS failed.",
-      },
-      { status: 502 },
-    );
-  });
-
-  return geminiProbeInFlight;
+  return geminiFallbackInFlight;
 }
 
-async function speak(text: string) {
+async function speak(text: string): Promise<Response> {
   const cleanText = text.replace(/\s+/g, " ").trim();
 
   if (!cleanText) {
@@ -381,24 +288,50 @@ async function speak(text: string) {
     );
   }
 
-  return speakWithPolicy(cleanText);
+  try {
+    return await elevenLabsPrimary(cleanText);
+  } catch (elevenError) {
+    console.warn(
+      "[VITA TTS] ElevenLabs PRIMARY failed; evaluating Gemini FALLBACK.",
+      elevenError,
+    );
+  }
+
+  if (geminiCoolingDown()) {
+    return NextResponse.json(
+      {
+        error:
+          "ElevenLabs TTS failed and Gemini TTS is temporarily disabled because of quota/rate limiting.",
+      },
+      { status: 503 },
+    );
+  }
+
+  try {
+    return await getGeminiFallback(cleanText);
+  } catch (geminiError) {
+    console.error("[VITA TTS] Gemini FALLBACK failed.", geminiError);
+
+    return NextResponse.json(
+      {
+        error:
+          `ElevenLabs primary failed; Gemini fallback failed: ${errText(
+            geminiError,
+          )}`,
+      },
+      { status: 502 },
+    );
+  }
 }
 
 export async function GET(req: NextRequest) {
-  return speak(
-    req.nextUrl.searchParams.get("text")?.trim() || "",
-  );
+  return speak(req.nextUrl.searchParams.get("text")?.trim() || "");
 }
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-
-    return speak(
-      typeof body?.text === "string"
-        ? body.text.trim()
-        : "",
-    );
+    return speak(typeof body?.text === "string" ? body.text.trim() : "");
   } catch {
     return NextResponse.json(
       { error: "Invalid TTS request body." },
@@ -406,50 +339,3 @@ export async function POST(req: NextRequest) {
     );
   }
 }
-
-async function elevenLabsFallback(
-  text: string,
-  error: unknown,
-) {
-  console.warn(
-    "[VITA TTS] Gemini TTS failed; using ElevenLabs fallback.",
-    error,
-  );
-
-  try {
-    const response = await elevenLabsPrimary(text, error);
-
-    if (response instanceof Response && response.ok) {
-      return response;
-    }
-
-    const body = response instanceof Response ? await response.text() : "";
-
-    return NextResponse.json(
-      {
-        error:
-          body ||
-          (error instanceof Error
-            ? error.message
-            : "ElevenLabs fallback failed after Gemini TTS failure."),
-      },
-      { status: response instanceof Response ? response.status || 502 : 502 },
-    );
-  } catch (fallbackError) {
-    console.error(
-      "[VITA TTS] ElevenLabs fallback failed:",
-      fallbackError,
-    );
-
-    return NextResponse.json(
-      {
-        error:
-          fallbackError instanceof Error
-            ? fallbackError.message
-            : "ElevenLabs fallback failed after Gemini TTS failure.",
-      },
-      { status: 502 },
-    );
-  }
-}
-
