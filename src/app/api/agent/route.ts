@@ -234,6 +234,65 @@ function localToolResponse(
   }
 }
 
+function detectFastIntent(message: string) {
+  const normalized = message
+    .toLowerCase()
+    .replace(/[!?.,']/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // Step-count queries
+  if (
+    /\b(step count|steps|how many steps|steps today|step total)\b/.test(
+      normalized,
+    ) &&
+    /\b(what|how many|show|check|tell me|count|do i have|taken|walked)\b/.test(
+      normalized,
+    )
+  ) {
+    return {
+      toolName: "get_step_count",
+      args: {},
+    };
+  }
+
+  // VITA state queries
+  if (
+    /\b(vita state|current state|status|health status|how am i doing)\b/.test(
+      normalized,
+    )
+  ) {
+    return {
+      toolName: "get_vita_state",
+      args: {},
+    };
+  }
+
+  // Start step tracking
+  if (
+    /\b(start|enable|turn on|begin|activate)\b/.test(normalized) &&
+    /\b(step tracking|step tracker|steps tracking)\b/.test(normalized)
+  ) {
+    return {
+      toolName: "set_step_tracking",
+      args: { enabled: true },
+    };
+  }
+
+  // Stop step tracking
+  if (
+    /\b(stop|disable|turn off|end|deactivate)\b/.test(normalized) &&
+    /\b(step tracking|step tracker|steps tracking)\b/.test(normalized)
+  ) {
+    return {
+      toolName: "set_step_tracking",
+      args: { enabled: false },
+    };
+  }
+
+  return null;
+}
+
 function extractFunctionCalls(data: any): InteractionStep[] {
   if (!Array.isArray(data?.steps)) return [];
 
@@ -363,6 +422,49 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    // Deterministic VITA commands do not need an LLM round-trip.
+    // Resolve them locally before calling Gemini to reduce latency and API usage.
+    const fastIntent = detectFastIntent(message);
+
+    if (fastIntent) {
+      const result = executeTool(
+        fastIntent.toolName,
+        fastIntent.args,
+        vitaState,
+      );
+
+      const answer = localToolResponse(
+        fastIntent.toolName,
+        result,
+      );
+
+      const clientActions = result?.clientAction
+        ? [result.clientAction]
+        : [];
+
+      const elapsed = Math.round(performance.now() - started);
+
+      console.log(
+        `[VITA FAST PATH] tool=${fastIntent.toolName} local-final ${elapsed}ms`,
+      );
+
+      return NextResponse.json({
+        answer,
+        provider: "local-fast-path",
+        model: null,
+        api: "local",
+        thinkingLevel: "none",
+        toolCalls: [
+          {
+            id: `local-${Date.now()}`,
+            name: fastIntent.toolName,
+          },
+        ],
+        clientActions,
+        latencyMs: elapsed,
+      });
+    }
+
     const state = stateForTool(vitaState);
 
     console.log(
@@ -420,8 +522,10 @@ export async function POST(req: NextRequest) {
 
     const calls = extractFunctionCalls(first);
 
-    // SIMPLE TOOL FAST PATH:
-    // Execute the tool locally and return a local spoken response.
+    // GEMINI TOOL PATH:
+    // Gemini classified the command as a tool call that the local fast
+    // recognizer did not match. Execute the tool locally and return the
+    // local spoken response without a second Gemini call.
     if (calls.length > 0) {
       const firstCall = calls[0];
 
