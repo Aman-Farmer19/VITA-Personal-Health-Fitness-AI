@@ -234,57 +234,147 @@ function localToolResponse(
   }
 }
 
-function detectFastIntent(message: string) {
-  const normalized = message
+type VitaIntent =
+  | "GET_STEP_COUNT"
+  | "GET_VITA_STATE"
+  | "START_TRACKING"
+  | "STOP_TRACKING"
+  | "START_WORKOUT"
+  | "STOP_WORKOUT"
+  | "GENERAL_CONVERSATION";
+
+type FastIntent = {
+  intent: VitaIntent;
+  toolName?: string;
+  args?: Record<string, unknown>;
+};
+
+function normalizeCommand(message: string): string {
+  return message
     .toLowerCase()
     .replace(/[!?.,']/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
 
-  // Step-count queries
-  if (
-    /\b(step count|steps|how many steps|steps today|step total)\b/.test(
+function detectFastIntent(message: string): FastIntent | null {
+  const normalized = normalizeCommand(message);
+
+  if (!normalized) return null;
+
+  // ── Session/control commands are handled client-side in VitaOrb. ─────
+  // Keep them OUT of this API router so a user saying "stop now" can end
+  // the active voice session without an unnecessary /api/agent call.
+
+  // ── GET_STEP_COUNT ────────────────────────────────────────────────────
+  const asksAboutSteps =
+    /\b(step count|steps|step total|steps today|how many steps)\b/.test(
       normalized,
-    ) &&
-    /\b(what|how many|show|check|tell me|count|do i have|taken|walked)\b/.test(
+    );
+
+  const stepQueryWords =
+    /\b(what|how many|show|check|tell me|count|taken|walked|have i|did i|my)\b/.test(
+      normalized,
+    );
+
+  if (
+    (asksAboutSteps && stepQueryWords) ||
+    /^(steps|my steps|step count|my step count|check my steps|check steps)$/.test(
       normalized,
     )
   ) {
     return {
+      intent: "GET_STEP_COUNT",
       toolName: "get_step_count",
       args: {},
     };
   }
 
-  // VITA state queries
+  // ── GET_VITA_STATE ───────────────────────────────────────────────────
   if (
-    /\b(vita state|current state|status|health status|how am i doing)\b/.test(
+    /\b(vita state|current state|status|health status|fitness status|how am i doing|how are you doing|are you online|are you connected|system status|current status)\b/.test(
+      normalized,
+    ) ||
+    /\b(is my (phone|camera|mic|microphone) (connected|on|active)|is the (phone|camera|mic|microphone) (connected|on|active)|phone connected)\b/.test(
       normalized,
     )
   ) {
     return {
+      intent: "GET_VITA_STATE",
       toolName: "get_vita_state",
       args: {},
     };
   }
 
-  // Start step tracking
+  // ── START_TRACKING ───────────────────────────────────────────────────
   if (
-    /\b(start|enable|turn on|begin|activate)\b/.test(normalized) &&
-    /\b(step tracking|step tracker|steps tracking)\b/.test(normalized)
+    (
+      /\b(start|enable|turn on|begin|activate|track)\b/.test(normalized) &&
+      /\b(step tracking|step tracker|steps tracking|step tracking mode)\b/.test(
+        normalized,
+      )
+    ) ||
+    /^(start tracking|start my steps|track my steps|start step tracking|start tracking my steps)$/.test(
+      normalized,
+    )
   ) {
     return {
+      intent: "START_TRACKING",
       toolName: "set_step_tracking",
       args: { enabled: true },
     };
   }
 
-  // Stop step tracking
+  // ── STOP_TRACKING ────────────────────────────────────────────────────
   if (
-    /\b(stop|disable|turn off|end|deactivate)\b/.test(normalized) &&
-    /\b(step tracking|step tracker|steps tracking)\b/.test(normalized)
+    (
+      /\b(stop|disable|turn off|end|deactivate)\b/.test(normalized) &&
+      /\b(step tracking|step tracker|steps tracking|step tracking mode)\b/.test(
+        normalized,
+      )
+    ) ||
+    /^(stop tracking|stop my steps|stop tracking steps|stop step tracking)$/.test(
+      normalized,
+    )
   ) {
     return {
+      intent: "STOP_TRACKING",
+      toolName: "set_step_tracking",
+      args: { enabled: false },
+    };
+  }
+
+  // ── START_WORKOUT ────────────────────────────────────────────────────
+  const startWorkout =
+    /\b(start|begin|activate|enable|track)\b/.test(normalized) &&
+    /\b(run|running|workout|exercise|jog|jogging)\b/.test(normalized);
+
+  if (
+    startWorkout ||
+    /^(start run|start running|begin running|start workout|start my workout|start exercise|start exercising|track my run)$/.test(
+      normalized,
+    )
+  ) {
+    return {
+      intent: "START_WORKOUT",
+      toolName: "set_step_tracking",
+      args: { enabled: true },
+    };
+  }
+
+  // ── STOP_WORKOUT ─────────────────────────────────────────────────────
+  const stopWorkout =
+    /\b(stop|end|disable|deactivate|finish|pause)\b/.test(normalized) &&
+    /\b(run|running|workout|exercise|jog|jogging)\b/.test(normalized);
+
+  if (
+    stopWorkout ||
+    /^(stop run|stop the run|stop running|stop my run|stop workout|stop my workout|stop exercise|stop exercising|finish workout|end workout)$/.test(
+      normalized,
+    )
+  ) {
+    return {
+      intent: "STOP_WORKOUT",
       toolName: "set_step_tracking",
       args: { enabled: false },
     };
@@ -426,10 +516,12 @@ export async function POST(req: NextRequest) {
     // Resolve them locally before calling Gemini to reduce latency and API usage.
     const fastIntent = detectFastIntent(message);
 
-    if (fastIntent) {
+    if (fastIntent?.toolName) {
+      const args = fastIntent.args ?? {};
+
       const result = executeTool(
         fastIntent.toolName,
-        fastIntent.args,
+        args,
         vitaState,
       );
 
@@ -445,14 +537,14 @@ export async function POST(req: NextRequest) {
       const elapsed = Math.round(performance.now() - started);
 
       console.log(
-        `[VITA FAST PATH] tool=${fastIntent.toolName} local-final ${elapsed}ms`,
+        `[VITA INTENT ROUTER] intent=${fastIntent.intent} tool=${fastIntent.toolName} local-final ${elapsed}ms`,
       );
 
       return NextResponse.json({
         answer,
         provider: "local-fast-path",
         model: null,
-        api: "local",
+        api: "local-intent-router",
         thinkingLevel: "none",
         toolCalls: [
           {
@@ -460,6 +552,7 @@ export async function POST(req: NextRequest) {
             name: fastIntent.toolName,
           },
         ],
+        intent: fastIntent.intent,
         clientActions,
         latencyMs: elapsed,
       });
@@ -468,7 +561,7 @@ export async function POST(req: NextRequest) {
     const state = stateForTool(vitaState);
 
     console.log(
-      `[VITA GEMINI] start model=${MODEL} thinking=${THINKING_LEVEL}`,
+      `[VITA GEMINI] intent=GENERAL_CONVERSATION start model=${MODEL} thinking=${THINKING_LEVEL}`,
     );
 
     // ONE model call. For tool commands, we do NOT call Gemini a second time.
@@ -561,6 +654,7 @@ export async function POST(req: NextRequest) {
         provider: "gemini",
         model: MODEL,
         api: "interactions",
+        intent: "GENERAL_CONVERSATION",
         thinkingLevel: THINKING_LEVEL,
         toolCalls: [
           {

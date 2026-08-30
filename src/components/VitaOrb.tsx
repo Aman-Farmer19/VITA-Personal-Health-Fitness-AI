@@ -86,6 +86,8 @@ export default function VitaOrb() {
   const liveTurnCompletedRef = useRef(false);
   const liveWaitingForTurnCompleteRef = useRef(false);
   const liveLastFinalChunkRef = useRef('');
+  const liveListenReadyAtRef = useRef(0);
+  const liveSpeechFramesRef = useRef(0);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const faceApiRef = useRef<any>(null);
@@ -537,10 +539,27 @@ export default function VitaOrb() {
       return;
     }
 
-    if (
-      /^(?:vita\s+)?stop(?:\s+now)?$/.test(normalized) ||
-      /^stop(?:\s+the\s+)?session$/.test(normalized)
-    ) {
+    // Natural session-stop commands. Keep this conservative so words such
+    // as "stop" inside normal conversation do not terminate the session.
+    const stopCommand =
+      /^(?:(?:okay|ok|alright|all right|hey)\s+)*(?:vita\s+)?(?:stop|stop now)$/.test(
+        normalized,
+      ) ||
+      /^(?:(?:okay|ok|alright|all right)\s+)*(?:vita\s+)?stop(?:\s+the)?\s+session$/.test(
+        normalized,
+      ) ||
+      /^(?:(?:okay|ok|alright|all right)[,\s]+)*(?:that's enough|thats enough)(?:\s+now)?(?:\s+(?:vita|please))?$/.test(
+        normalized,
+      ) ||
+      /^(?:(?:okay|ok|alright|all right)[,\s]+)*(?:you can|please)\s+stop(?:\s+now)?$/.test(
+        normalized,
+      ) ||
+      /^(?:okay|ok|alright|all right|hey)[,\s]+vita[,\s]+(?:stop|stop now)$/.test(
+        normalized,
+      ) ||
+      /^(?:goodbye|bye)(?:\s+vita)?$/.test(normalized);
+
+    if (stopCommand) {
       console.log('[VITA LIVE STT] STOP command detected');
       liveFinalizingRef.current = false;
       endSessionRef.current?.();
@@ -572,6 +591,8 @@ export default function VitaOrb() {
     liveLastFinalChunkRef.current = '';
     liveStartedAtRef.current = performance.now();
     liveLastVoiceAtRef.current = liveStartedAtRef.current;
+    liveListenReadyAtRef.current = liveStartedAtRef.current + 1500;
+    liveSpeechFramesRef.current = 0;
 
     try {
       setStatusMsg('GETTING LIVE STT TOKEN...');
@@ -822,9 +843,21 @@ export default function VitaOrb() {
 
         if (!payload?.pcm16k) return;
 
-        if (payload.rms > 0.02) {
-          liveHasSpokenRef.current = true;
-          liveLastVoiceAtRef.current = performance.now();
+        const now = performance.now();
+
+        // After TTS, give the microphone a short settling window. This avoids
+        // speaker bleed / acoustic echo immediately arming the next turn.
+        const listeningArmed = now >= liveListenReadyAtRef.current;
+
+        if (payload.rms > 0.02 && listeningArmed) {
+          liveSpeechFramesRef.current += 1;
+
+          // Require a few consecutive voice frames before treating the turn
+          // as genuine speech. This filters short echoes/noise spikes.
+          if (liveSpeechFramesRef.current >= 3) {
+            liveHasSpokenRef.current = true;
+            liveLastVoiceAtRef.current = now;
+          }
 
           if (threeRef.current) {
             threeRef.current.voiceAmp = Math.min(
@@ -832,6 +865,8 @@ export default function VitaOrb() {
               payload.rms * 5,
             );
           }
+        } else if (payload.rms <= 0.02) {
+          liveSpeechFramesRef.current = 0;
         }
 
         try {
@@ -853,8 +888,9 @@ export default function VitaOrb() {
 
         if (
           liveHasSpokenRef.current &&
+          listeningArmed &&
           !liveEndSentRef.current &&
-          performance.now() - liveLastVoiceAtRef.current >= 1200 &&
+          now - liveLastVoiceAtRef.current >= 1200 &&
           !liveFinalizingRef.current
         ) {
           liveEndSentRef.current = true;
@@ -894,8 +930,9 @@ export default function VitaOrb() {
         // Safety limit only. A normal utterance should end by silence first.
         // Keep this comfortably above the previous 7-second limit.
         if (
+          liveHasSpokenRef.current &&
           !liveEndSentRef.current &&
-          performance.now() - liveStartedAtRef.current >= 20000 &&
+          now - liveStartedAtRef.current >= 20000 &&
           !liveFinalizingRef.current
         ) {
           liveEndSentRef.current = true;
@@ -1131,8 +1168,18 @@ export default function VitaOrb() {
       setTranscript(`"${answer.toUpperCase()}"`);
       await speakVita(answer);
 
+      // Keep the VITA session alive for natural multi-turn conversation.
+      // The completed Live STT socket is closed after the answer, then a
+      // fresh Live STT turn is started so the next utterance can be heard.
       if (sessionActiveRef.current) {
-        endSessionRef.current?.();
+        await stopLiveTranscription(false);
+        console.log('[VITA SESSION] READY FOR NEXT TURN');
+
+        window.setTimeout(() => {
+          if (sessionActiveRef.current) {
+            void startMicRef.current?.();
+          }
+        }, 250);
       }
 
       return answer;
@@ -1157,6 +1204,7 @@ export default function VitaOrb() {
     stepsOn,
     phoneLinked,
     speakVita,
+    stopLiveTranscription,
   ]);
 
   askVitaRef.current = askVita;
