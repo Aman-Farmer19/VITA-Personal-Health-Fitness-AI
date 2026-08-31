@@ -1,403 +1,474 @@
+<div align="center">
 
+🔮 VITA
 
+Personal Health & Fitness AI
 
-🔮 VITA — Personal Health & Fitness AI
-VITA is a voice-first personal health and fitness assistant designed as a real-time, state-aware application rather than a simple chatbot.
+A real-time, voice-first health companion that connects AI, live phone telemetry, computer vision, and an interactive 3D interface.
 
-It combines conversational voice interaction, live fitness telemetry from a phone, tool-based AI actions, and an interactive Three.js visualization in a single Next.js application.
+<p>
+  <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js" alt="Next.js">
+  <img src="https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white" alt="React">
+  <img src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white" alt="TypeScript">
+  <img src="https://img.shields.io/badge/Three.js-0.161-black?logo=three.js" alt="Three.js">
+  <img src="https://img.shields.io/badge/Gemini-Agent-4285F4?logo=google" alt="Gemini">
+  <img src="https://img.shields.io/badge/ElevenLabs-TTS-111111" alt="ElevenLabs">
+  <img src="https://img.shields.io/badge/WebSocket-Realtime-00C853" alt="WebSocket">
+</p>
 
-Current status: Core voice, AI, phone sensor, WebSocket, HTTPS/WSS, multi-turn session, and production-build flows have been tested successfully.
+<p>
+  <a href="#-what-is-vita">Overview</a> •
+  <a href="#-architecture">Architecture</a> •
+  <a href="#-features">Features</a> •
+  <a href="#-quick-start">Quick Start</a> •
+  <a href="#-demo-flow">Demo</a>
+</p>
 
-What VITA Does
-VITA combines four main interaction layers:
+</div>
 
-🎙️ Voice: wake phrase → live speech transcription → AI response → neural TTS
+👁️ See VITA
 
-📱 Phone telemetry: DeviceMotion-based step detection streamed to the laptop over WebSocket
+<p align="center">
+  <img src="screenshots/vita-dashboard.png" alt="VITA interactive dashboard" width="96%">
+</p>
 
-📷 Camera/mood: face-api.js expression detection with a demo fallback when the camera/models are unavailable
+<p align="center">
+  <img src="screenshots/vita-voice.png" alt="VITA voice interaction" width="47%">
+  <img src="screenshots/vita-steps.png" alt="VITA live step tracking" width="47%">
+</p>
 
-🔮 Interactive HUD: Three.js orb and HUD react to voice amplitude, activity, steps, mood, and phone connection state
+The key idea: VITA is not just an LLM wrapper. It is a real-time application that combines voice, live device data, controlled AI tools, and an interactive UI.
 
-Core Architecture
-                         ┌──────────────────────────┐
-                         │        VITA UI            │
-                         │      Next.js + React      │
-                         └────────────┬─────────────┘
-                                      │
-             ┌────────────────────────┼────────────────────────┐
-             │                        │                        │
-             ▼                        ▼                        ▼
-        🎙 Voice                  📱 Phone                 📷 Camera
-             │                        │                        │
-             │                 DeviceMotionEvent        face-api.js
-             │                        │                        │
-             │                  StepDetector             Mood state
-             │                        │
-             │                      WSS
-             │                        │
-             └───────────────┬────────┘
-                             ▼
-                    ┌──────────────────┐
-                    │  VITA Application │
-                    │      State       │
-                    └────────┬─────────┘
-                             │
-                      ┌──────▼───────┐
-                      │ Intent Router │
-                      └──────┬───────┘
-                             │
-                    ┌────────▼─────────┐
-                    │  Gemini Agent    │
-                    │ + controlled     │
-                    │   tools          │
-                    └────────┬─────────┘
-                             │
-                 ┌───────────┴────────────┐
-                 │                        │
-          Live VITA state            Direct answer
-                 │                        │
-                 └───────────┬────────────┘
-                             ▼
-                     ElevenLabs TTS
-                             │
-                             ▼
-                         🔊 Audio
-Voice Pipeline
-The laptop voice flow is designed as a multi-turn session:
+🧠 What is VITA?
 
-Wake phrase
-   ↓
-Session activation
-   ↓
-Live STT token acquisition
-   ↓
-Gemini Live transcription WebSocket
-   ↓
-Interim transcription
-   ↓
-Local silence detection
-   ↓
-Final transcript
-   ↓
+VITA is a state-aware personal health and fitness AI assistant.
+
+It can:
+
+listen for a wake phrase and hold a multi-turn voice conversation;
+
+transcribe speech in real time;
+
+query live VITA fitness state through controlled tools;
+
+respond using neural text-to-speech;
+
+receive live step/activity telemetry from a phone;
+
+react visually to activity, voice amplitude, mood, and connection state.
+
+⚡ Features
+
+Capability
+
+What it does
+
+🎙️ Wake + Voice
+
+Wake phrase, live transcription, multi-turn conversation
+
+🧠 AI Agent
+
+Gemini-based routing with controlled application tools
+
+🔊 Neural TTS
+
+Spoken responses through ElevenLabs
+
+📱 Live Fitness
+
+Phone accelerometer → step detection → laptop dashboard
+
+🔌 Realtime Sync
+
+WSS channel for phone/laptop state synchronization
+
+📷 Computer Vision
+
+Face-expression detection with a safe fallback mode
+
+🔮 3D HUD
+
+Three.js orb reacts to voice, activity, mood, and state
+
+🛡️ Guardrails
+
+Live measurements are read from application state instead of invented
+
+🏗️ Architecture
+
+                 ┌─────────────────────────────┐
+                 │          VITA UI             │
+                 │       Next.js + React        │
+                 └─────────────┬───────────────┘
+                               │
+          ┌────────────────────┼────────────────────┐
+          │                    │                    │
+          ▼                    ▼                    ▼
+       🎙 VOICE             📱 PHONE             📷 CAM
+          │                    │                    │
+       Live STT          DeviceMotionEvent     face-api.js
+          │                    │                    │
+          │                StepDetector        Mood state
+          │                    │                    │
+          └─────────────┬──────┴────────────────────┘
+                        ▼
+                ┌─────────────────┐
+                │   VITA State    │
+                └────────┬────────┘
+                         ▼
+                  Intent Router
+                         ▼
+                 Gemini Agent
+                         │
+                ┌────────┴────────┐
+                ▼                 ▼
+            Tool calls        Direct answer
+                │                 │
+                └────────┬────────┘
+                         ▼
+                   ElevenLabs
+                         ▼
+                       🔊 TTS
+
+Two realtime channels, two responsibilities
+
+PHONE WSS
+Phone telemetry
+      ↓
+VITA application state
+      ↓
+Dashboard + AI tools
+
+LIVE STT WS
+Microphone audio
+      ↓
+Live transcription
+      ↓
 /api/agent
-   ↓
-Intent routing
-   ↓
-Gemini + application tools
-   ↓
-Answer
-   ↓
-/api/speak
-   ↓
-ElevenLabs
-   ↓
-Audio playback
-   ↓
-Fresh STT turn
-VITA keeps the conversation alive across turns and explicitly supports a voice STOP command.
-
-The current implementation also handles browser audio restrictions by unlocking audio after a real user gesture, while preserving the wake-word workflow.
-
-AI and Tool Architecture
-VITA does not give the language model unrestricted control of the application.
-
-The backend exposes controlled application tools such as:
-
-Tool	Purpose
-get_step_count	Read the current step count from live VITA state
-get_vita_state	Read current fitness, activity, mood, sensor, and session state
-set_step_tracking	Start or stop tracking when the user explicitly requests it
-The backend instructions also distinguish live measurements from estimates and prevent the assistant from inventing unavailable health measurements.
-
-This gives VITA an agent-style architecture:
-
-User request
-    ↓
-Intent Router
-    ↓
+      ↓
 Gemini
-    ↓
-Tool decision
-    ↓
-Tool execution
-    ↓
-Verified application state
-    ↓
-Natural-language response
-Phone Sensor Pipeline
-The phone acts as a sensor client rather than running the entire application.
+      ↓
+ElevenLabs
+      ↓
+Audio response
 
-Android / iPhone browser
-        ↓
+The detailed sequence diagram is in ARCHITECTURE.md.
+
+🎙️ Voice Pipeline
+
+"Hello Vita"
+     ↓
+Wake phrase accepted
+     ↓
+Session ACTIVE
+     ↓
+Live STT WebSocket
+     ↓
+Final transcript
+     ↓
+/api/agent
+     ↓
+Intent Router
+     ↓
+Gemini + controlled tools
+     ↓
+Verified application state / answer
+     ↓
+/api/speak
+     ↓
+ElevenLabs
+     ↓
+🔊 Audio playback
+     ↓
+Next conversational turn
+
+VITA supports natural STOP commands such as:
+
+"Vita stop"
+"Vita stop now"
+"Okay, Vita, stop now"
+"Thanks, Vita, stop now"
+"Goodbye Vita"
+
+📱 Phone Sensor Pipeline
+
+Phone browser
+     ↓
 /phone
-        ↓
+     ↓
 DeviceMotionEvent
-        ↓
+     ↓
 StepDetector
-        ↓
+     ↓
 steps / cadence / activity / distance / calories
-        ↓
-WebSocket (WSS)
-        ↓
+     ↓
+WSS → /vita-ws
+     ↓
 Laptop VITA
-        ↓
+     ↓
 HUD + AI state
-The phone sends structured messages such as:
+
+The phone sends structured realtime events including:
 
 phone_ready
-
 tracking_started
-
 steps
-
 tracking_stopped
 
-The laptop receives the stream and updates its live VITA state.
+🧰 AI Tools
 
-Local HTTPS / WSS Architecture
-Phone motion APIs require a secure browser context in the relevant deployment scenario. VITA therefore uses a local HTTPS server for LAN testing.
+VITA exposes a deliberately small, controlled tool surface:
 
-Development certificate setup uses mkcert.
+Tool
 
-Current demo endpoints:
+Purpose
 
-Laptop:
+get_step_count
+
+Read current steps from live VITA state
+
+get_vita_state
+
+Read current fitness, activity, mood, sensor, and session state
+
+set_step_tracking
+
+Start/stop step tracking only when explicitly requested
+
+The agent is instructed to distinguish measured state from estimates and to never invent unavailable health measurements.
+
+🧩 Tech Stack
+
+Frontend
+
+Next.js · React · TypeScript · Three.js · Tailwind CSS
+
+AI / Voice
+
+Google Gemini · Gemini Live Transcription · ElevenLabs TTS
+
+Realtime / Device
+
+WebSocket / WSS · DeviceMotionEvent · AudioWorklet · face-api.js
+
+Backend
+
+Node.js · Next.js API Routes · ws · Custom HTTPS server
+
+🔐 Why HTTPS + WSS?
+
+The phone sensor workflow relies on browser capabilities that are restricted to secure contexts.
+
+For local LAN testing, VITA uses a locally trusted HTTPS certificate created with mkcert:
+
 https://localhost:3000
-
-Phone:
 https://<LAPTOP-LAN-IP>:3000/phone
-The custom server.js:
 
-Starts Next.js
+The same secure origin is used for the phone/laptop WSS connection.
 
-Serves HTTPS using the local certificate
+🚀 Quick Start
 
-Listens on 0.0.0.0:3000
+1. Install
 
-Hosts the /vita-ws WebSocket endpoint
-
-Relays phone telemetry to connected laptop clients
-
-For the current local demo, the laptop and phone must be reachable on the same local network/hotspot.
-
-Project Structure
-vita-app/
-├── server.js
-├── certs/
-│   ├── vita-cert.pem
-│   └── vita-key.pem
-├── src/
-│   ├── app/
-│   │   ├── page.tsx
-│   │   ├── phone/
-│   │   │   └── page.tsx
-│   │   └── api/
-│   │       ├── agent/
-│   │       ├── local-ip/
-│   │       ├── speak/
-│   │       └── transcribe-live-token/
-│   ├── components/
-│   │   ├── VitaOrb.tsx
-│   │   ├── VitaSessionController.tsx
-│   │   └── VitaTtsVoiceLock.tsx
-│   └── lib/
-│       └── stepDetector.ts
-├── public/
-│   ├── manifest.json
-│   ├── icon-192.png
-│   ├── favicon.ico
-│   ├── local-ip.json
-│   └── vita-pcm-processor.js
-├── .env.local
-├── package.json
-└── README.md
-Setup
-1. Install dependencies
 npm install
-2. Create local HTTPS certificates
-Install mkcert on Windows and create a local certificate containing the laptop LAN IP, localhost, and 127.0.0.1.
 
-Example:
+2. Create local certificates
+
+Install mkcert, then:
 
 mkcert -install
 mkcert -key-file certs/vita-key.pem -cert-file certs/vita-cert.pem 192.168.162.202 localhost 127.0.0.1
-Use your current LAN IP if it changes.
 
-3. Configure environment variables
-Create/update .env.local with the API credentials required by the configured VITA backend.
+Use your current laptop LAN IP if it changes.
 
-Do not commit secrets to Git.
+3. Configure secrets
 
-Production Demo Run
-The current reliable demo flow uses a production Next.js build behind the custom HTTPS server.
+Create .env.local with the API credentials required by your configured VITA backend.
 
-Build
-Because the project can require additional Node heap during static generation on Windows:
+Never commit .env.local, private keys, or local certificates.
+
+4. Build
+
+On Windows:
 
 $env:NODE_OPTIONS="--max-old-space-size=4096"
 npm run build
-Start VITA
+
+5. Start production mode
+
 $env:NODE_ENV="production"
 node server.js
-Then open:
 
-https://localhost:3000
-On the phone:
+Open:
 
-https://<LAPTOP-LAN-IP>:3000/phone
-Demo Flow
-A predictable mentor/interview demonstration:
+Laptop → https://localhost:3000
+Phone  → https://<LAPTOP-LAN-IP>:3000/phone
 
-1. Connect the phone
-Open /phone and verify:
+🎬 Demo Flow
 
-LINKED TO LAPTOP ✓
-2. Start tracking
-Tap:
+A clean mentor/interview demonstration:
 
-👟 START TRACKING
-Walk with the phone.
+1. Open VITA
+2. Show PHONE LINKED
+3. Start phone tracking
+4. Walk for a few seconds
+5. Show steps / cadence / activity updating
+6. Say "Hello Vita"
+7. Ask "What is my step count today?"
+8. Ask "What is my current activity?"
+9. Ask a general fitness question
+10. Say "Thanks, Vita, stop now."
 
-The laptop dashboard should update:
+What this demonstrates
 
-STEPS
-CADENCE
-ACTIVITY
-DISTANCE
-CALORIES
-3. Start voice
-Use the VITA voice control and say:
+Device telemetry
+      ↓
+Realtime transport
+      ↓
+Application state
+      ↓
+AI tool routing
+      ↓
+LLM response
+      ↓
+Neural TTS
+      ↓
+Conversational UX
 
-Hello Vita
-Then demonstrate:
+✅ Current Status
 
-What is my step count today?
-VITA reads the current application state through the tool layer and responds through neural TTS.
+System
 
-4. Demonstrate state awareness
-Ask:
+Status
 
-What is my current activity?
-or:
+Next.js / React UI
 
-What's your status now?
-5. Demonstrate multi-turn voice
-Ask a general fitness question such as:
+✅
 
-Why is consistency important for fitness?
-6. End the session naturally
-Thanks, Vita, stop now.
-or:
+Three.js HUD
 
-Vita, stop now.
-VITA detects the STOP command and returns to the wake-listening state.
+✅
 
-Feature Status
-Capability	Status
-Next.js application	✅
-Interactive Three.js orb	✅
-Wake phrase	✅
-Browser audio unlock	✅
-Live STT	✅
-Interim/final transcription	✅
-Silence-based turn completion	✅
-Intent routing	✅
-Gemini agent	✅
-Controlled application tools	✅
-ElevenLabs neural TTS	✅
-Multi-turn voice session	✅
-Voice STOP commands	✅
-Phone DeviceMotion	✅
-Step detection	✅
-Phone → laptop WebSocket	✅
-Local HTTPS	✅
-Laptop WSS	✅
-PWA manifest	✅
-Production build	✅
-Camera mood detection	✅
-Mood fallback simulation	✅
-Local step fallback simulation	✅
-Implementation Notes
-Audio
-Browser autoplay policies can block audible playback until a user gesture has occurred. VITA therefore performs a best-effort browser audio unlock after a real interaction and also uses the explicit VOICE control as an unlock path.
+Wake phrase
 
-Live speech
-The application captures microphone audio, processes it through an AudioWorklet, converts it to 16 kHz PCM, and streams the resulting data to the configured Live Transcription service.
+✅
 
-Voice turn control
-VITA uses local silence detection and a safety duration limit to decide when an utterance has ended. Completed turns close the current Live STT stream and create a fresh stream for the next turn.
+Browser audio unlock
 
-Phone telemetry
-The phone client creates a WSS connection back to /vita-ws, then sends structured state messages. The laptop updates its dashboard and AI state from those messages.
+✅
 
-Current Limitations
-This is a local demonstration architecture, not a hardened internet-facing production deployment.
+Live STT
 
-Important current limitations include:
+✅
 
-The local HTTPS certificate must be trusted by the test device.
+Gemini agent
 
-Laptop and phone must be able to reach each other on the local network/hotspot.
+✅
 
-Browser microphone/autoplay permissions vary by browser and platform.
+Controlled tools
 
-The displayed heart-rate value is currently a simulated UI value rather than a medical sensor measurement.
+✅
 
-Camera mood detection depends on browser camera access and the face-api.js models; a fallback mode is available.
+ElevenLabs TTS
 
-LLM and TTS latency depends on external service response time and network conditions.
+✅
 
-Engineering Decisions
-Why WebSockets?
-Phone telemetry is event-driven and continuous. WebSockets avoid repeated polling requests and allow the laptop dashboard to react immediately when new step data arrives.
+Multi-turn voice
 
-Why HTTPS locally?
-Modern browsers restrict several device capabilities to secure contexts. The phone sensor workflow therefore uses a locally trusted HTTPS origin during LAN testing.
+✅
 
-Why separate STT and application WebSockets?
-The phone/laptop WSS channel carries VITA device telemetry and connection events.
+STOP commands
 
-The Live STT WebSocket is a separate connection dedicated to real-time transcription.
+✅
 
-Keeping these responsibilities separate makes the voice pipeline independent from the phone telemetry channel.
+Phone DeviceMotion
 
-Why controlled tools?
-The agent should be able to read and change only explicitly supported application state. Tool execution also provides a verifiable source for live measurements and actions.
+✅
 
-Interview Summary
-A strong one-minute description:
+StepDetector
 
-VITA is a real-time personal health and fitness AI assistant built with Next.js and a custom HTTPS/WebSocket server. It combines live voice interaction, Gemini-based intent routing with controlled application tools, ElevenLabs neural TTS, and a phone sensor module using DeviceMotion and WebSockets. The phone streams fitness telemetry such as steps, cadence, activity, distance, and calories to the laptop, while the AI can query the live application state and respond conversationally.
+✅
 
-The key engineering story is that VITA is not just an LLM wrapper. It is an integrated system combining real-time audio, AI agents/tools, device telemetry, WebSockets, secure browser APIs, application state, and interactive visualization.
+Phone → Laptop WSS
 
-Future Improvements
-Potential next-stage improvements:
+✅
 
-Persistent user accounts and cloud-backed fitness history
+Local HTTPS
 
-Database-backed longitudinal health state
+✅
 
-Authentication and device pairing
+Production build
 
-Production WebSocket gateway with horizontal scaling
+✅
 
-More robust observability and tracing
+Camera / mood detection
 
-LLM evaluation and regression tests
+✅
 
-Latency optimization and streaming responses
+🧪 Engineering Highlights
 
-Wearable integrations for real heart-rate data
+Realtime-first architecture
+Phone telemetry is pushed through WebSockets instead of repeatedly polling.
 
-More advanced activity recognition
+State-aware AI
+The agent can query live application state and invoke explicitly supported tools.
 
-These are future engineering directions rather than requirements for the current mentor demo.
+Separation of concerns
+Phone telemetry and Live STT use independent realtime channels.
 
-License
-Private portfolio / demonstration project.
+Defensive voice flow
+Silence detection, reconnect behavior, TTS tracking, cleanup, and explicit STOP handling keep the interaction resilient.
 
-Built with persistence, debugging, and a lot of iteration. 🦇
+Browser-aware voice UX
+A one-time user gesture unlocks browser audio without removing the wake-word experience.
 
-By- The Farmer & Aspiring AI Engineer Aman Tiwari
+⚠️ Current Limitations
+
+This repository represents a local portfolio / demonstration architecture, not an internet-facing production deployment.
+
+Laptop and phone must be able to reach each other over the local network/hotspot.
+
+The development HTTPS certificate must be trusted by the test device.
+
+Browser permissions vary across platforms.
+
+The displayed heart-rate value is a simulated UI value, not a medical measurement.
+
+Camera mood detection depends on camera access and model availability.
+
+LLM/TTS latency depends on network and upstream provider response times.
+
+🔭 Future Engineering
+
+Persistent user accounts and longitudinal fitness history
+
+Cloud-backed analytics
+
+Authenticated device pairing
+
+Scalable WebSocket infrastructure
+
+Observability and distributed tracing
+
+Streamed / lower-latency model responses
+
+Wearable and real heart-rate integrations
+
+Automated AI evaluation and regression testing
+
+👨‍💻 Built By
+
+Aman Tiwari
+
+AI / Full-Stack Engineering · Generative AI · Real-time Systems
+
+Built as a hands-on exploration of what happens when an LLM becomes one component inside a real application.
+
+<div align="center">
+
+⭐ Explore the architecture. Run the demo. Inspect the code.
+
+VITA Repository
+
+</div>
