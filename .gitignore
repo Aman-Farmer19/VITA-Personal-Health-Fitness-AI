@@ -23,5 +23,9 @@ Thumbs.db
 # Editor
 .vscode/
 
+# Local HTTPS certificates
+certs/*.pem
+*.pem
+
 /public/local-ip.json
 tsconfig.tsbuildinfo

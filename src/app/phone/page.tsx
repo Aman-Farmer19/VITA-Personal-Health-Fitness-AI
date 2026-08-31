@@ -1,5 +1,5 @@
-'use client';
 
+'use client';
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { StepDetector, type StepData } from '../../lib/stepDetector';
 
@@ -15,64 +15,185 @@ export default function PhonePage() {
   const wsRef = useRef<WebSocket | null>(null);
   const detectorRef = useRef(new StepDetector());
   const motionRef = useRef<((e: DeviceMotionEvent) => void) | null>(null);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sequenceRef = useRef(0);
+  const disposedRef = useRef(false);
 
-  // ── WebSocket connection ─────────────────────────────────────────
   const connect = useCallback(() => {
+    if (disposedRef.current) return;
+
+    if (wsRef.current?.readyState === WebSocket.OPEN ||
+      wsRef.current?.readyState === WebSocket.CONNECTING) {
+      return;
+    }
+
     setConnState('connecting');
-    const ws = new WebSocket(`ws://${window.location.host}/vita-ws?type=phone`);
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+
+    const ws = new WebSocket(
+      `${protocol}//${window.location.host}/vita-ws?type=phone`
+    );
     wsRef.current = ws;
 
-    ws.onopen = () => setConnState('connected');
-    ws.onclose = () => { setConnState('disconnected'); setTimeout(connect, 3000); }; // auto-reconnect
+    ws.onopen = () => {
+      sequenceRef.current = 0;
+      setConnState('connected');
+      ws.send(JSON.stringify({
+        type: 'phone_ready',
+        source: 'phone',
+        protocol: 'vita-phone-v1',
+        timestamp: Date.now(),
+        sequence: ++sequenceRef.current,
+      }));
+    };
+
+    ws.onclose = () => {
+      if (wsRef.current === ws) {
+        wsRef.current = null;
+      }
+
+      setConnState('disconnected');
+
+      if (!disposedRef.current) {
+        if (reconnectTimerRef.current) {
+          clearTimeout(reconnectTimerRef.current);
+        }
+        reconnectTimerRef.current = setTimeout(connect, 3000);
+      }
+    };
+
     ws.onerror = () => setConnState('error');
   }, []);
 
   useEffect(() => {
+    disposedRef.current = false;
     connect();
-    fetch('/api/local-ip').then(r => r.json()).then(d => setLaptopIP(d.ip));
-    return () => wsRef.current?.close();
+    fetch('/api/local-ip').then(r => r.json()).then(d => setLaptopIP(d.ip)).catch(() => { });
+
+    return () => {
+      disposedRef.current = true;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      wsRef.current?.close();
+      wsRef.current = null;
+    };
   }, [connect]);
 
-  // ── Send data to laptop ──────────────────────────────────────────
-  function send(data: object) {
+  function send(data: Record<string, unknown>) {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(data));
+      wsRef.current.send(JSON.stringify({
+        ...data,
+        source: 'phone',
+        protocol: 'vita-phone-v1',
+        timestamp: Date.now(),
+        sequence: ++sequenceRef.current,
+      }));
     }
   }
 
-  // ── Step tracking ────────────────────────────────────────────────
   const startTracking = useCallback(async () => {
-    // iOS 13+ requires explicit permission
-    if (typeof (DeviceMotionEvent as any).requestPermission === 'function') {
-      try {
-        const perm = await (DeviceMotionEvent as any).requestPermission();
-        if (perm !== 'granted') { setTrackState('denied'); return; }
-      } catch {
-        setTrackState('denied'); return;
+    console.log('[VITA PHONE] START TRACKING clicked');
+
+    try {
+      // Check browser support first.
+      if (typeof window === 'undefined') return;
+
+      if (!('DeviceMotionEvent' in window)) {
+        console.error('[VITA PHONE] DeviceMotionEvent unavailable');
+        setTrackState('unsupported');
+        return;
       }
+
+      console.log('[VITA PHONE] DeviceMotionEvent available');
+
+      // iOS requires explicit permission.
+      const MotionEvent = DeviceMotionEvent as any;
+
+      if (typeof MotionEvent.requestPermission === 'function') {
+        console.log('[VITA PHONE] requesting motion permission...');
+
+        const permission = await MotionEvent.requestPermission();
+
+        console.log('[VITA PHONE] motion permission:', permission);
+
+        if (permission !== 'granted') {
+          setTrackState('denied');
+          return;
+        }
+      } else {
+        // Android/Chrome normally comes through here.
+        console.log('[VITA PHONE] explicit motion permission not required');
+      }
+
+      const detector = detectorRef.current;
+
+      detector.reset();
+
+      detector.onStep = (data) => {
+        console.log('[VITA PHONE] STEP:', data);
+
+        setStepData(data);
+
+        send({
+          type: 'steps',
+          ...data,
+        });
+      };
+
+      const handler = (e: DeviceMotionEvent) => {
+        const a = e.accelerationIncludingGravity || e.acceleration;
+
+        if (!a) {
+          console.warn('[VITA PHONE] motion event received without acceleration');
+          return;
+        }
+
+        if (a.x == null || a.y == null || a.z == null) {
+          console.warn('[VITA PHONE] acceleration values unavailable');
+          return;
+        }
+
+        detector.update(
+          a.x,
+          a.y,
+          a.z
+        );
+      };
+
+      // Remove an old listener if one somehow exists.
+      if (motionRef.current) {
+        window.removeEventListener(
+          'devicemotion',
+          motionRef.current
+        );
+      }
+
+      motionRef.current = handler;
+
+      window.addEventListener(
+        'devicemotion',
+        handler,
+        { passive: true }
+      );
+
+      // IMPORTANT:
+      // Update the UI immediately after successfully registering
+      // the sensor listener.
+      setTrackState('active');
+
+      send({
+        type: 'tracking_started',
+      });
+
+      console.log('[VITA PHONE] ✅ motion tracking ACTIVE');
+
+    } catch (error) {
+      console.error('[VITA PHONE] START TRACKING ERROR:', error);
+      setTrackState('denied');
     }
-
-    if (!('DeviceMotionEvent' in window)) {
-      setTrackState('unsupported'); return;
-    }
-
-    const detector = detectorRef.current;
-    detector.reset();
-
-    detector.onStep = (data) => {
-      setStepData(data);
-      send({ type: 'steps', ...data });
-    };
-
-    const handler = (e: DeviceMotionEvent) => {
-      const a = e.accelerationIncludingGravity || e.acceleration;
-      if (a?.x != null) detector.update(a.x!, a.y!, a.z!);
-    };
-
-    window.addEventListener('devicemotion', handler);
-    motionRef.current = handler;
-    setTrackState('active');
-    send({ type: 'tracking_started' });
   }, []);
 
   const stopTracking = useCallback(() => {
@@ -86,7 +207,6 @@ export default function PhonePage() {
     send({ type: 'tracking_stopped' });
   }, []);
 
-  // ── Colours ──────────────────────────────────────────────────────
   const connColour: Record<ConnState, string> = {
     connecting: '#FFD700',
     connected: '#00FF88',
@@ -108,14 +228,11 @@ export default function PhonePage() {
       flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
       padding: '24px', fontFamily: "'Space Mono','Courier New',monospace", color: '#00E5FF',
     }}>
-
-      {/* ── Header ── */}
       <div style={{ textAlign: 'center', marginBottom: '32px' }}>
         <div style={{ fontSize: 28, fontWeight: 700, letterSpacing: 14, color: '#00E5FF', marginBottom: 6 }}>VITA</div>
         <div style={{ fontSize: 9, letterSpacing: 5, color: '#7C3AED' }}>PHONE SENSOR MODULE</div>
       </div>
 
-      {/* ── Connection status ── */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 8,
         fontSize: 9, letterSpacing: 3, marginBottom: 32,
@@ -134,7 +251,6 @@ export default function PhonePage() {
         {connState === 'error' && 'CONNECTION ERROR'}
       </div>
 
-      {/* ── Step Ring ── */}
       <div style={{ position: 'relative', width: 160, height: 160, marginBottom: 28 }}>
         <svg viewBox="0 0 100 100" style={{ width: '100%', height: '100%' }}>
           <circle cx="50" cy="50" r="44" fill="none" stroke="#1a0a2e" strokeWidth="5" />
@@ -164,7 +280,6 @@ export default function PhonePage() {
         </svg>
       </div>
 
-      {/* ── Stats grid ── */}
       <div style={{
         display: 'grid', gridTemplateColumns: '1fr 1fr',
         gap: '16px 28px', marginBottom: 32, width: '100%', maxWidth: 280,
@@ -182,13 +297,29 @@ export default function PhonePage() {
         ))}
       </div>
 
-      {/* ── Track button ── */}
       {trackState === 'idle' && (
-        <button className="phone-btn" onClick={startTracking}
-          style={{ borderColor: '#FFD700', color: '#FFD700' }}>
+        <button
+          className="phone-btn"
+          onClick={() => {
+            console.log('[VITA PHONE] BUTTON CLICKED');
+
+            // Prove the React event is working.
+            setTrackState('active');
+
+            // Then start the actual sensor.
+            startTracking();
+          }}
+          style={{
+            borderColor: '#FFD700',
+            color: '#FFD700',
+            cursor: 'pointer',
+            touchAction: 'manipulation',
+          }}
+        >
           👟 START TRACKING
         </button>
       )}
+
       {trackState === 'active' && (
         <button className="phone-btn" onClick={stopTracking}
           style={{ borderColor: '#FF2D9A', color: '#FF2D9A', animation: 'pulse 1.5s infinite' }}>
@@ -208,7 +339,6 @@ export default function PhonePage() {
         </div>
       )}
 
-      {/* ── Footer ── */}
       <div style={{ marginTop: 32, fontSize: 7, color: '#7C3AED33', letterSpacing: 2, textAlign: 'center' }}>
         LAPTOP: {laptopIP}:3000<br />
         VITA PHONE MODULE v1.0

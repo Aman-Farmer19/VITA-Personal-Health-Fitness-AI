@@ -50,6 +50,55 @@ export default function VitaOrb() {
   const [stepSim, setStepSim] = useState(false);
   const [sessionActive, setSessionActive] = useState(false);
 
+  // ── Browser audio unlock ─────────────────────────────────────────
+  // Chrome can block audible HTMLAudioElement.play() until a user gesture.
+  // VITA therefore unlocks audio on the first real page interaction.
+  const unlockAudio = useCallback(() => {
+    if (audioUnlockedRef.current || typeof window === 'undefined') return;
+
+    try {
+      // Resume a Web Audio context as an additional unlock path.
+      if (!ttsAudioContextRef.current) {
+        ttsAudioContextRef.current = new AudioContext();
+      }
+      void ttsAudioContextRef.current.resume().catch(() => undefined);
+
+      // Prime HTML media playback with a tiny silent WAV during the gesture.
+      const prime = new Audio(
+        'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIAfAAABAAgAZGF0YQAAAAA='
+      );
+      prime.preload = 'auto';
+      prime.volume = 1;
+
+      void prime.play()
+        .then(() => {
+          audioUnlockedRef.current = true;
+          prime.pause();
+          prime.removeAttribute('src');
+          prime.load();
+          console.log('[VITA AUDIO] browser audio unlocked');
+        })
+        .catch(() => {
+          // Keep listening for a later user gesture; do not disturb VITA.
+        });
+    } catch {
+      // Audio unlock is best-effort and must never affect the voice pipeline.
+    }
+  }, []);
+
+  useEffect(() => {
+    const onUserGesture = () => unlockAudio();
+
+    // Capture phase ensures the unlock runs before button handlers.
+    document.addEventListener('pointerdown', onUserGesture, true);
+    document.addEventListener('keydown', onUserGesture, true);
+
+    return () => {
+      document.removeEventListener('pointerdown', onUserGesture, true);
+      document.removeEventListener('keydown', onUserGesture, true);
+    };
+  }, [unlockAudio]);
+
   // Three.js state ref
   const threeRef = useRef<{
     renderer: any; composer: any; scene: any; camera: any; group: any;
@@ -64,6 +113,7 @@ export default function VitaOrb() {
   const ttsAudioContextRef = useRef<AudioContext | null>(null);
   const ttsVoiceRef = useRef<SpeechSynthesisVoice | null>(null);
   const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
+  const audioUnlockedRef = useRef(false);
   const ttsRequestIdRef = useRef(0);
   const ttsCooldownUntilRef = useRef(0);
   const ttsActiveRef = useRef(false);
@@ -141,7 +191,8 @@ export default function VitaOrb() {
   // ── WebSocket ───────────────────────────────────────────────────
   useEffect(() => {
     const connect = () => {
-      const ws = new WebSocket(`ws://${window.location.host}/vita-ws?type=laptop`);
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${protocol}//${window.location.host}/vita-ws?type=laptop`);
       wsRef.current = ws;
       ws.onmessage = (e) => {
         try {
@@ -542,19 +593,19 @@ export default function VitaOrb() {
     // Natural session-stop commands. Keep this conservative so words such
     // as "stop" inside normal conversation do not terminate the session.
     const stopCommand =
-      /^(?:(?:okay|ok|alright|all right|hey)\s+)*(?:vita\s+)?(?:stop|stop now)$/.test(
+      /^(?:(?:okay|ok|alright|all right|hey|thanks|thank you)\s+)*(?:vita\s*[,\s]+)?(?:stop|stop now)$/.test(
         normalized,
       ) ||
-      /^(?:(?:okay|ok|alright|all right)\s+)*(?:vita\s+)?stop(?:\s+the)?\s+session$/.test(
+      /^(?:(?:okay|ok|alright|all right)\s+)*(?:vita\s*[,\s]+)?stop(?:\s+the)?\s+session$/.test(
         normalized,
       ) ||
-      /^(?:(?:okay|ok|alright|all right)[,\s]+)*(?:that's enough|thats enough)(?:\s+now)?(?:\s+(?:vita|please))?$/.test(
+      /^(?:(?:okay|ok|alright|all right)\s+)*(?:vita\s*[,\s]+)*(?:that's enough|thats enough)(?:\s+now)?(?:\s+(?:vita|please))?$/.test(
         normalized,
       ) ||
-      /^(?:(?:okay|ok|alright|all right)[,\s]+)*(?:you can|please)\s+stop(?:\s+now)?$/.test(
+      /^(?:(?:okay|ok|alright|all right)\s+)*(?:vita\s*[,\s]+)*(?:you can|please)\s+stop(?:\s+now)?$/.test(
         normalized,
       ) ||
-      /^(?:okay|ok|alright|all right|hey)[,\s]+vita[,\s]+(?:stop|stop now)$/.test(
+      /^(?:okay|ok|alright|all right|hey|thanks|thank you)\s*[,\s]+vita\s*[,\s]+(?:stop|stop now)$/.test(
         normalized,
       ) ||
       /^(?:goodbye|bye)(?:\s+vita)?$/.test(normalized);
@@ -1027,6 +1078,10 @@ export default function VitaOrb() {
       audio.volume = 1;
       audio.src = audioUrl;
 
+      if (!audioUnlockedRef.current) {
+        console.warn('[VITA TTS] browser audio is not unlocked yet; playback may require a user gesture.');
+      }
+
       ttsAudioRef.current = audio;
 
       await new Promise<void>((resolve, reject) => {
@@ -1271,12 +1326,14 @@ export default function VitaOrb() {
   }, [activateSession]);
 
   const handleVoiceButton = useCallback(() => {
+    unlockAudio();
+
     if (sessionActiveRef.current) {
       endSession();
     } else {
       void activateSession();
     }
-  }, [activateSession, endSession]);
+  }, [activateSession, endSession, unlockAudio]);
 
   // ── PHASE 2: Face Cam ───────────────────────────────────────────
   const applyMood = useCallback((key: string) => {
@@ -1467,7 +1524,7 @@ export default function VitaOrb() {
         {!phoneLinked && localIP && !stepsOn && (
           <div style={{ position: 'absolute', bottom: 115, right: 24, fontSize: 7, color: '#7C3AED55', letterSpacing: 1, textAlign: 'right', lineHeight: 1.6 }}>
             CONNECT PHONE:<br />
-            <span style={{ color: '#7C3AED99' }}>http://{localIP}:3000/phone</span>
+            <span style={{ color: '#7C3AED99' }}>https://{localIP}:3000/phone</span>
           </div>
         )}
 
